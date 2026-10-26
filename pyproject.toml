@@ -1,0 +1,21 @@
+[project]
+name = "zspace-emby-bridge"
+version = "0.1.0"
+description = "极影视进度桥：把 Hills 的播放进度写进极影视"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "paramiko>=3.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools]
+packages = ["app"]

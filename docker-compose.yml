@@ -1,0 +1,27 @@
+services:
+  bridge:
+    build: .
+    image: zspace-emby-bridge:local
+    container_name: zspace-emby-bridge
+    restart: unless-stopped
+    ports:
+      # 极空间系统进程占用了 127.0.0.1:8022，只绑 LAN IP 可继续用 8022
+      - "192.168.2.8:8022:8022"
+    env_file:
+      - .env
+    environment:
+      # 容器内直接写挂载进来的数据库文件
+      NATIVE_MODE: local
+      NATIVE_DB_PATH: /zvideo/zvideo.db
+      DB_PATH: /data/progress.db
+      LISTEN_PORT: "8022"
+    volumes:
+      - ./data:/data
+      # 极影视自己的库目录：容器需要读写（写进度、已看）
+      - /zspace/zsrp/sqlite/zvideo:/zvideo
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8022/healthz', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
