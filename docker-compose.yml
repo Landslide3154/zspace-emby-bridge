@@ -21,10 +21,21 @@ services:
       LISTEN_PORT: ${LISTEN_PORT:-8022}
     volumes:
       - ./config:/data
-      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
+      # 极空间图形界面不接受 /zspace/... 形式的 host 挂载（报 invalid volume path），
+      # 所以库目录走「命名卷 + bind 驱动」，实际落点仍是 /zspace/zsrp/sqlite/zvideo。
+      # 换机器/换库路径只改下面 volumes.zvideo-db.driver_opts.device。
+      - zvideo-db:/zvideo
     healthcheck:
       test: ["CMD", "python", "-c", "import os,urllib.request,sys; port=os.environ.get('LISTEN_PORT','8022'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=3).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+volumes:
+  zvideo-db:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /zspace/zsrp/sqlite/zvideo

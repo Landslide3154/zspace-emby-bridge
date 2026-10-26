@@ -47,51 +47,11 @@ Requires `/zspace/zsrp/sqlite/zvideo/zvideo.db` on the host (created by 极影�
 On ZSpace, Docker-created projects live under
 `/tmp/zfsv3/nvme12/<account>/data/docker/<project>/` (same place as jackett and komga).
 
-> **The ZSpace Docker GUI rejects some bind mounts**: it validates `host:container` entries itself, so system
-> partitions like `/zspace/...` are refused with
-> `custom validation failed: invalid volume path: /zspace/zsrp/sqlite/zvideo`.
-> The compose file is not wrong — the same config passes `docker compose config`; this is GUI-only validation.
->
-> **To keep managing it in the GUI and still mount `/zspace`, use a named volume with the bind driver**: the GUI
-> only sees a volume name, while the mount still lands on `/zspace`:
->
-> ```yaml
-> services:
->   bridge:
->     # ...rest unchanged...
->     volumes:
->       - ./config:/data
->       - zvideo-db:/zvideo          # a volume name, not a host path
->
-> volumes:
->   zvideo-db:
->     driver: local
->     driver_opts:
->       type: none
->       o: bind
->       device: /zspace/zsrp/sqlite/zvideo
-> ```
->
-> If the GUI also inspects the path inside `device:`, switch to an **external volume** — the path then appears
-> only in a one-off creation step, and compose references just the name:
->
-> ```bash
-> sudo docker volume create zvideo-db --driver local \
->   --opt type=none --opt o=bind --opt device=/zspace/zsrp/sqlite/zvideo
-> ```
->
-> ```yaml
->     volumes:
->       - ./config:/data
->       - zvideo-db:/zvideo
->
-> volumes:
->   zvideo-db:
->     external: true
-> ```
->
-> Both variants are verified on a real ZSpace NAS: inside the container `ls /zvideo` shows `zvideo.db` (206 MB)
-> and `zvideo.db-wal`, and `/healthz` returns 200.
+> **Why the database is a named volume, not a plain `host:container` mount**: the ZSpace Docker GUI validates
+> `host:container` entries itself, so system partitions like `/zspace/...` are refused with
+> `custom validation failed: invalid volume path`. With a named volume plus the bind driver the GUI only sees a
+> volume name, while the mount still lands on `/zspace/zsrp/sqlite/zvideo`. **Do not change it back to
+> `/zspace/...:/zvideo`.**
 
 ### 1. `docker-compose.yml` (annotated, copy as-is)
 
@@ -114,8 +74,18 @@ services:
       DB_PATH: /data/progress.db              # local progress DB, kept in ./config
     volumes:
       - ./config:/data                        # settings + progress DB next to the compose file
-      # NATIVE_DB_DIR already defaults to the 极影视 directory, usually leave it
-      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
+      # the 极影视 database: a named volume (see the note above); it still lands on
+      # /zspace/zsrp/sqlite/zvideo
+      - zvideo-db:/zvideo
+
+# named volume + bind driver: point the volume at the 极影视 database directory
+volumes:
+  zvideo-db:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /zspace/zsrp/sqlite/zvideo      # change this line for another machine/database path
 ```
 
 ### 2. `.env` (annotated, only three values are required)
@@ -139,8 +109,6 @@ BIND_IP=192.168.2.8
 LISTEN_PORT=8022
 # published port (use 8023 if taken, then update clients)
 BRIDGE_PORT=8022
-# 极影视 database directory
-NATIVE_DB_DIR=/zspace/zsrp/sqlite/zvideo
 LOG_LEVEL=INFO
 TZ=Asia/Shanghai
 # watched threshold (0~1)
@@ -204,7 +172,15 @@ services:
       ADMIN_PASSWORD: ""
     volumes:
       - ./config:/data
-      - /zspace/zsrp/sqlite/zvideo:/zvideo
+      - zvideo-db:/zvideo
+
+volumes:
+  zvideo-db:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /zspace/zsrp/sqlite/zvideo
 ```
 
 ### Build it yourself
@@ -230,7 +206,6 @@ docker build --build-arg BASE=docker.1ms.run/library/python:3.12-slim \
 | `LISTEN_PORT` | `8022` | container listen port |
 | `BRIDGE_PORT` | `8022` | host port published by compose |
 | `BIND_IP` | `0.0.0.0` | host bind address (use the NAS LAN IP when 8022 is taken) |
-| `NATIVE_DB_DIR` | `/zspace/zsrp/sqlite/zvideo` | directory of the 极影视 database |
 | `ALLOWED_IPS` | – | console IP allowlist, comma separated |
 | `DB_PATH` | `data/progress.db` | local progress database |
 | `LOG_LEVEL` | `INFO` | log level (also editable in console) |
@@ -278,7 +253,7 @@ Open `http://<NAS>:8022/admin`:
 
 | Symptom | Where to look |
 | --- | --- |
-| `custom validation failed: invalid volume path` | the ZSpace GUI only accepts whitelisted host paths; use the named-volume-with-bind-driver form (see the note under Layout), or an external volume |
+| `custom validation failed: invalid volume path` | the ZSpace GUI refuses `host:container` mounts of `/zspace`; use the named-volume-with-bind-driver form from this README and do not switch back to a plain path |
 | Hills cannot connect | `/healthz`, port mapping, firewall |
 | Progress not written | log line `原生进度已写`, console toggle for native writes |
 | `reason=unresolved_id` | unknown item id shape — open an issue with the id from the log |

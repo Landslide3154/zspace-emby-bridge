@@ -49,47 +49,10 @@ Hills ──▶ 本代理 :8022 ──▶ 极影视 Emby :8021   读接口 / 图
 极空间上用 Docker 界面建的项目，目录一般是
 `/tmp/zfsv3/nvme12/<账号>/data/docker/<项目名>/`（和 jackett、komga 同级）。
 
-> **极空间图形界面会拦挂载路径**：它对 service 里的 `host:container` 挂载做自定义校验，`/zspace/...` 这类系统分区会被拒，报
-> `custom validation failed: invalid volume path: /zspace/zsrp/sqlite/zvideo`。
-> 这不是 compose 写错——同样配置命令行 `docker compose config` 能通过，纯 GUI 校验。
->
-> **仍然用图形界面管理、又必须挂到 `/zspace` 的写法：命名卷 + bind 驱动**。界面看到的是卷名，实际挂载落在 `/zspace`：
->
-> ```yaml
-> services:
->   bridge:
->     # ……其余同上……
->     volumes:
->       - ./config:/data
->       - zvideo-db:/zvideo          # 不写 host 路径，写卷名
->
-> volumes:
->   zvideo-db:
->     driver: local
->     driver_opts:
->       type: none
->       o: bind
->       device: /zspace/zsrp/sqlite/zvideo
-> ```
->
-> 如果界面连 `device:` 里的路径也校验，就退成「外部卷」——路径只在一次性创建时出现，之后 compose 里只有卷名：
->
-> ```bash
-> sudo docker volume create zvideo-db --driver local \
->   --opt type=none --opt o=bind --opt device=/zspace/zsrp/sqlite/zvideo
-> ```
->
-> ```yaml
->     volumes:
->       - ./config:/data
->       - zvideo-db:/zvideo
->
-> volumes:
->   zvideo-db:
->     external: true
-> ```
->
-> 两种写法我都在极空间上实测过：容器里 `ls /zvideo` 能看到 `zvideo.db`（206 MB）与 `zvideo.db-wal`，`/healthz` 返回 200。
+> **为什么库目录用「命名卷」而不是 `host:container` 直接挂**：极空间图形界面对 service 里的
+> `host:container` 挂载做自定义校验，`/zspace/...` 这类系统分区会被拒，报
+> `custom validation failed: invalid volume path`。改用命名卷 + bind 驱动后，界面看到的是卷名，
+> 实际挂载仍落在 `/zspace/zsrp/sqlite/zvideo`，图形界面可以正常管理。**不要把它改回 `/zspace/...:/zvideo` 的写法。**
 
 ### 1. `docker-compose.yml`（注释版，复制即用）
 
@@ -112,8 +75,17 @@ services:
       DB_PATH: /data/progress.db              # 本地进度库，落在 ./config 里
     volumes:
       - ./config:/data                        # 配置与进度库，跟 compose 同目录
-      # NATIVE_DB_DIR 默认就是极空间的库目录，一般不用改
-      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
+      # 极影视的库：用命名卷（见上面的说明），实际落点在 /zspace/zsrp/sqlite/zvideo
+      - zvideo-db:/zvideo
+
+# 命名卷 + bind 驱动：把卷指到极影视的库目录
+volumes:
+  zvideo-db:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /zspace/zsrp/sqlite/zvideo      # 换机器/换库路径只改这一行
 ```
 
 ### 2. `.env`（注释版，只有三项必填）
@@ -137,8 +109,6 @@ BIND_IP=192.168.2.8
 LISTEN_PORT=8022
 # 对外端口（被占就改 8023，客户端地址同步改）
 BRIDGE_PORT=8022
-# 极影视库目录
-NATIVE_DB_DIR=/zspace/zsrp/sqlite/zvideo
 LOG_LEVEL=INFO
 TZ=Asia/Shanghai
 # 已看阈值（0~1）
@@ -203,7 +173,15 @@ services:
       ADMIN_PASSWORD: ""
     volumes:
       - ./config:/data
-      - /zspace/zsrp/sqlite/zvideo:/zvideo
+      - zvideo-db:/zvideo
+
+volumes:
+  zvideo-db:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /zspace/zsrp/sqlite/zvideo
 ```
 
 ### 自己构建
@@ -229,7 +207,6 @@ docker build --build-arg BASE=docker.1ms.run/library/python:3.12-slim \
 | `LISTEN_PORT` | `8022` | 容器内监听端口 |
 | `BRIDGE_PORT` | `8022` | 宿主对外端口（compose 用） |
 | `BIND_IP` | `0.0.0.0` | 宿主绑定地址；极空间上常写 `192.168.2.8` 避开系统占用 |
-| `NATIVE_DB_DIR` | `/zspace/zsrp/sqlite/zvideo` | 极影视库目录（compose 挂载用） |
 | `ALLOWED_IPS` | 空 | 面板 IP 白名单，逗号分隔 |
 | `DB_PATH` | `data/progress.db` | 本地进度库（写入缓冲/兜底） |
 | `LOG_LEVEL` | `INFO` | 日志级别，面板可改 |
@@ -277,7 +254,7 @@ docker build --build-arg BASE=docker.1ms.run/library/python:3.12-slim \
 
 | 现象 | 先看哪里 |
 | --- | --- |
-| `custom validation failed: invalid volume path` | 极空间图形界面只放行它白名单内的 host 挂载路径；改用「命名卷 + bind 驱动」写法（见「目录结构」下方的说明），或退成外部卷 |
+| `custom validation failed: invalid volume path` | 极空间图形界面不接受 `host:container` 形式的 `/zspace` 挂载；按 README 的「命名卷 + bind 驱动」写，别改回直接挂路径 |
 | Hills 连不上 | `/healthz`、端口 8022 是否映射、防火墙 |
 | 进度不同步到极影视 | 日志有没有 `原生进度已写`；面板里「原生进度写入」是否开着 |
 | 日志 `原生进度未写 … reason=unresolved_id` | 该条目的 id 形态没认出来，把日志里的 item 发到 issues |
