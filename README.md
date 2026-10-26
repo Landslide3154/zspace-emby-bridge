@@ -77,29 +77,44 @@ services:
 ### 2. `.env`（注释版，只有三项必填）
 
 ```ini
+# ===== 必填三项 =====
+
 # 【必填 1】极影视的 Emby 接口地址
 UPSTREAM_URL=http://192.168.2.8:8021
 
 # 【必填 2】极空间账号（极影视库里的 user_name）
 NATIVE_USER=
 
-# 【必填 3】绑定地址：极空间上必须写本机 LAN IP；
-# 写 0.0.0.0 会和系统进程抢 127.0.0.1:8022 导致启动失败
+# 【必填 3】绑定地址：极空间上必须写本机 LAN IP
+# （写 0.0.0.0 会和系统进程抢 127.0.0.1:8022，启动失败）
 BIND_IP=192.168.2.8
 
-# ↓↓↓ 以下保持默认即可，不用改 ↓↓↓
-LISTEN_PORT=8022                  # 容器内监听端口
-BRIDGE_PORT=8022                  # 对外端口（被占就改 8023，客户端地址同步改）
+# ===== 以下保持默认即可 =====
+
+# 容器内监听端口
+LISTEN_PORT=8022
+# 对外端口（被占就改 8023，客户端地址同步改）
+BRIDGE_PORT=8022
+# 极影视库目录
 NATIVE_DB_DIR=/zspace/zsrp/sqlite/zvideo
 LOG_LEVEL=INFO
 TZ=Asia/Shanghai
-PLAYED_THRESHOLD=0.9              # 已看阈值
-NATIVE_MIN_INTERVAL=10            # 写库最小间隔（秒）
-SYNC_GRACE_SECONDS=15             # 本地记录宽限期（秒）
-SYNC_STREAM_PREFS=true            # 是否同步音轨/字幕偏好
-ALLOWED_IPS=                      # 面板 IP 白名单，逗号分隔，留空不限制
-ADMIN_PASSWORD=                   # 留空＝首次打开 /admin 时设置；也可直接填 ≥6 位
+# 已看阈值（0~1）
+PLAYED_THRESHOLD=0.9
+# 写库最小间隔（秒）
+NATIVE_MIN_INTERVAL=10
+# 本地记录宽限期（秒）
+SYNC_GRACE_SECONDS=15
+# 是否同步音轨/字幕偏好
+SYNC_STREAM_PREFS=true
+# 面板 IP 白名单，逗号分隔，留空不限制
+ALLOWED_IPS=
+# 留空＝首次打开 /admin 时设置；也可直接填 ≥6 位
+ADMIN_PASSWORD=
 ```
+
+> **`.env` 里不要写行尾注释**：Compose 会把 ` # ...` 一起当成值。写成 `LISTEN_PORT=8022 # 容器内监听端口` 会让端口变成 `8022 # 容器内监听端口`，启动时报
+> `invalid containerPort: 8022 # 容器内监听端口`。注释一律**另起一行**。
 
 `NATIVE_MODE` / `NATIVE_DB_PATH` / `DB_PATH` 已经在 compose 的 `environment` 里固定，不用写进 `.env`（写了也会被那三行覆盖）。
 

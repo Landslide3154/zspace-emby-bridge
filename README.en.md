@@ -75,29 +75,43 @@ services:
 ### 2. `.env` (annotated, only three values are required)
 
 ```ini
+# ===== three required values =====
+
 # [required 1] 极影视 Emby endpoint
 UPSTREAM_URL=http://192.168.2.8:8021
 
 # [required 2] ZSpace account (the user_name inside zvideo.db)
 NATIVE_USER=
 
-# [required 3] bind address: on ZSpace use the NAS LAN IP; 0.0.0.0 collides
-# with the process already listening on 127.0.0.1:8022
+# [required 3] bind address: on ZSpace use the NAS LAN IP
+# (0.0.0.0 collides with the process already on 127.0.0.1:8022)
 BIND_IP=192.168.2.8
 
-# ↓ defaults below, no need to change ↓
-LISTEN_PORT=8022                  # container listen port
-BRIDGE_PORT=8022                  # published port (use 8023 if taken, then update clients)
+# ===== defaults below, no need to change =====
+
+# container listen port
+LISTEN_PORT=8022
+# published port (use 8023 if taken, then update clients)
+BRIDGE_PORT=8022
+# 极影视 database directory
 NATIVE_DB_DIR=/zspace/zsrp/sqlite/zvideo
 LOG_LEVEL=INFO
 TZ=Asia/Shanghai
-PLAYED_THRESHOLD=0.9              # watched threshold
-NATIVE_MIN_INTERVAL=10            # min seconds between DB writes
-SYNC_GRACE_SECONDS=15             # grace window for local records
-SYNC_STREAM_PREFS=true            # sync audio/subtitle selection
-ALLOWED_IPS=                      # console IP allowlist, comma separated, empty = no limit
-ADMIN_PASSWORD=                   # empty = set on first visit to /admin; or preset it (>= 6 chars)
+# watched threshold (0~1)
+PLAYED_THRESHOLD=0.9
+# min seconds between DB writes
+NATIVE_MIN_INTERVAL=10
+# grace window for local records (seconds)
+SYNC_GRACE_SECONDS=15
+# sync audio/subtitle selection
+SYNC_STREAM_PREFS=true
+# console IP allowlist, comma separated, empty = no limit
+ALLOWED_IPS=
+# empty = set on first visit to /admin; or preset it (>= 6 chars)
+ADMIN_PASSWORD=
 ```
+
+> **Never put trailing comments in `.env`**: Compose treats ` # ...` as part of the value. `LISTEN_PORT=8022 # comment` becomes the port `8022 # comment` and startup fails with `invalid containerPort: 8022 # comment`. Put comments on their own line.
 
 `NATIVE_MODE` / `NATIVE_DB_PATH` / `DB_PATH` are pinned in the compose `environment` block, so leave them out of `.env`.
 
