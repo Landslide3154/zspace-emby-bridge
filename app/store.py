@@ -37,6 +37,15 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      REAL NOT NULL,
+    kind    TEXT NOT NULL,
+    item_id TEXT,
+    title   TEXT,
+    detail  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC);
 """
 
 
@@ -138,6 +147,29 @@ class ProgressStore:
                 "SELECT runtime_ticks FROM item_runtime WHERE item_id = ?", (item_id,)
             ).fetchone()
         return int(row["runtime_ticks"]) if row is not None else None
+
+    def add_event(self, kind: str, item_id: str | None = None, title: str | None = None, detail: str = "") -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO events (ts, kind, item_id, title, detail) VALUES (?, ?, ?, ?, ?)",
+                (time.time(), kind, item_id, title, detail),
+            )
+
+    def recent_events(self, limit: int = 20) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts, kind, item_id, title, detail FROM events ORDER BY ts DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [
+            {
+                "ts": float(row["ts"]),
+                "kind": row["kind"],
+                "item_id": row["item_id"],
+                "title": row["title"],
+                "detail": row["detail"],
+            }
+            for row in rows
+        ]
 
     def delete(self, token_id: str, item_id: str) -> None:
         """极影视那边删了记录时，本地也跟着清，避免把旧进度又塞回客户端。"""

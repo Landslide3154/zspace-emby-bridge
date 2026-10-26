@@ -1,15 +1,14 @@
-"""控制台：首次设置密码、登录、设置、状态、Prometheus 指标。"""
+"""控制台：首次设置密码、登录、设置、搜索、事件、指标。"""
 from __future__ import annotations
 
 import hashlib
 import hmac
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
-from pathlib import Path
-
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
 from .config import Settings
@@ -23,6 +22,8 @@ SESSION_TTL = 7 * 24 * 3600
 PASSWORD_KEY = "admin_password"
 SECRET_KEY = "admin_secret"
 MIN_PASSWORD = 6
+MAX_FAILURES = 5
+FAILURE_WINDOW = 600
 
 
 def hash_password(password: str, salt: str | None = None) -> str:
@@ -71,6 +72,11 @@ class AdminAuth:
         )
         self._load()
 
+    def change_password(self, old: str, new: str) -> None:
+        if not verify_password(self._password, old):
+            raise ValueError("原密码不对")
+        self.setup(new)
+
     def login(self, password: str) -> str | None:
         if not self._password or not verify_password(self._password, password):
             return None
@@ -100,20 +106,46 @@ def build_admin_router(
     version: str,
 ) -> APIRouter:
     router = APIRouter()
+    failures: dict[str, list[float]] = {}
+
+    def client_ip(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    def allowlisted(request: Request) -> bool:
+        raw = runtime.options.allowed_ips.strip()
+        if not raw:
+            return True
+        allowed = {item.strip() for item in raw.replace(";", ",").split(",") if item.strip()}
+        return client_ip(request) in allowed
 
     def authenticated(request: Request) -> bool:
         return auth.check(request.cookies.get(COOKIE_NAME))
 
     def guard(request: Request) -> JSONResponse | None:
+        if not allowlisted(request):
+            return JSONResponse({"detail": "该 IP 不在白名单里"}, status_code=403)
         if not authenticated(request):
             return JSONResponse({"detail": "请先登录"}, status_code=401)
         if request.method not in {"GET", "HEAD"} and request.headers.get("x-requested-with") != "fetch":
             return JSONResponse({"detail": "缺少 X-Requested-With"}, status_code=400)
         return None
 
-    @router.get("/admin", response_class=HTMLResponse)
-    async def admin_page() -> HTMLResponse:
-        return HTMLResponse(ADMIN_HTML)
+    def writer():
+        return getattr(proxy, "writer", None)
+
+    def with_names(records: list[dict]) -> list[dict]:
+        lookup = getattr(writer(), "lookup", None)
+        names: dict[str, dict] = {}
+        if lookup is not None and records:
+            try:
+                names = lookup([record.get("item_id") or "" for record in records])
+            except Exception:  # 名字只用于展示，取不到不算错
+                names = {}
+        for record in records:
+            info = names.get(record.get("item_id") or "") or {}
+            record["title"] = info.get("title")
+            record["file"] = info.get("file")
+        return records
 
     @router.get("/icon.png")
     async def icon_png() -> FileResponse:
@@ -127,12 +159,17 @@ def build_admin_router(
     async def favicon() -> FileResponse:
         return FileResponse(ASSETS / "icon-64.png", media_type="image/png")
 
+    @router.get("/admin", response_class=HTMLResponse)
+    async def admin_page() -> HTMLResponse:
+        return HTMLResponse(ADMIN_HTML)
+
     @router.get("/admin/api/session")
     async def session(request: Request) -> dict:
         return {
             "authenticated": authenticated(request),
             "needs_setup": auth.needs_setup,
             "version": version,
+            "allowed": allowlisted(request),
         }
 
     @router.post("/admin/api/setup")
@@ -151,10 +188,17 @@ def build_admin_router(
 
     @router.post("/admin/api/login")
     async def login(request: Request) -> JSONResponse:
+        ip = client_ip(request)
+        now = time.time()
+        attempts = [stamp for stamp in failures.get(ip, []) if now - stamp < FAILURE_WINDOW]
+        if len(attempts) >= MAX_FAILURES:
+            return JSONResponse({"detail": "尝试次数过多，请 10 分钟后再试"}, status_code=429)
         body = await request.json()
         token = auth.login(str(body.get("password", "")))
         if token is None:
+            failures[ip] = attempts + [now]
             return JSONResponse({"detail": "密码不对"}, status_code=401)
+        failures.pop(ip, None)
         response = JSONResponse({"ok": True})
         response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="strict", max_age=SESSION_TTL)
         return response
@@ -165,6 +209,21 @@ def build_admin_router(
         response.delete_cookie(COOKIE_NAME)
         return response
 
+    @router.post("/admin/api/password")
+    async def change_password(request: Request) -> Any:
+        denied = guard(request)
+        if denied is not None:
+            return denied
+        body = await request.json()
+        try:
+            auth.change_password(str(body.get("old", "")), str(body.get("new", "")))
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        token = auth.login(str(body.get("new", "")))
+        response = JSONResponse({"ok": True})
+        response.set_cookie(COOKIE_NAME, token or "", httponly=True, samesite="strict", max_age=SESSION_TTL)
+        return response
+
     @router.get("/admin/api/status")
     async def status(request: Request) -> Any:
         denied = guard(request)
@@ -172,12 +231,15 @@ def build_admin_router(
             return denied
         return {
             "version": version,
-            "upstream": settings.upstream_url,
+            "upstream": runtime.options.upstream_url or settings.upstream_url,
             "native_mode": settings.native_mode,
             "native_enabled": runtime.options.native_enabled,
+            "listen_port": settings.listen_port,
             "progress_records": store.count(),
             "stats": proxy.stats,
-            "recent": store.recent(10),
+            "recent": with_names(store.recent(12)),
+            "events": store.recent_events(8),
+            "sessions": with_names(proxy.sessions_view()),
         }
 
     @router.get("/admin/api/settings")
@@ -193,6 +255,8 @@ def build_admin_router(
             "sync_grace_seconds": options.sync_grace_seconds,
             "sync_stream_prefs": options.sync_stream_prefs,
             "log_level": options.log_level,
+            "upstream_url": options.upstream_url,
+            "allowed_ips": options.allowed_ips,
         }
 
     @router.post("/admin/api/settings")
@@ -201,10 +265,13 @@ def build_admin_router(
         if denied is not None:
             return denied
         body = await request.json()
+        previous_upstream = runtime.options.upstream_url
         try:
             options = runtime.update(**body)
         except (TypeError, ValueError) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
+        if options.upstream_url != previous_upstream:
+            await proxy.set_upstream(options.upstream_url)
         return {"ok": True, "options": options.__dict__}
 
     @router.post("/admin/api/settings/reset")
@@ -212,17 +279,64 @@ def build_admin_router(
         denied = guard(request)
         if denied is not None:
             return denied
+        previous = runtime.options.upstream_url
         options = runtime.reset()
+        if options.upstream_url != previous:
+            await proxy.set_upstream(options.upstream_url)
         return {"ok": True, "options": options.__dict__}
 
-    @router.get("/admin/api/skips/{collection_id}")
-    async def skips(request: Request, collection_id: str) -> Any:
+    @router.post("/admin/api/upstream/test")
+    async def upstream_test(request: Request) -> Any:
         denied = guard(request)
         if denied is not None:
             return denied
-        writer = getattr(proxy, "writer", None)
-        ranges = writer.list_skips(collection_id) if writer is not None else []
-        return {"collection_id": collection_id, "skips": ranges}
+        return await proxy.test_upstream()
+
+    @router.get("/admin/api/search")
+    async def search(request: Request, q: str = "") -> Any:
+        denied = guard(request)
+        if denied is not None:
+            return denied
+        finder = getattr(writer(), "search", None)
+        matches = finder(q, 20) if finder is not None else []
+        return {"query": q, "matches": matches}
+
+    @router.get("/admin/api/skips")
+    async def skips(request: Request, q: str = "") -> Any:
+        denied = guard(request)
+        if denied is not None:
+            return denied
+        finder = getattr(writer(), "search", None)
+        lister = getattr(writer(), "list_skips", None)
+        if finder is None or lister is None:
+            return {"query": q, "matches": []}
+        matches = finder(q, 10)
+        for match in matches:
+            match["skips"] = lister(match["collection_id"])
+        return {"query": q, "matches": matches}
+
+    @router.get("/admin/api/export", response_class=PlainTextResponse)
+    async def export_config(request: Request) -> Any:
+        denied = guard(request)
+        if denied is not None:
+            return denied
+        options = runtime.options
+        lines = [
+            "# 由控制台导出，可贴进 .env",
+            f"UPSTREAM_URL={options.upstream_url or settings.upstream_url}",
+            f"LISTEN_PORT={settings.listen_port}",
+            f"DB_PATH={settings.db_path}",
+            f"LOG_LEVEL={options.log_level}",
+            f"PLAYED_THRESHOLD={options.played_threshold}",
+            f"NATIVE_MODE={settings.native_mode}",
+            f"NATIVE_DB_PATH={settings.native_db_path}",
+            f"NATIVE_USER={settings.native_user}",
+            f"NATIVE_MIN_INTERVAL={options.native_min_interval}",
+            f"SYNC_GRACE_SECONDS={options.sync_grace_seconds}",
+            f"SYNC_STREAM_PREFS={'true' if options.sync_stream_prefs else 'false'}",
+            f"ALLOWED_IPS={options.allowed_ips}",
+        ]
+        return PlainTextResponse("\n".join(lines) + "\n")
 
     @router.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> PlainTextResponse:
@@ -247,4 +361,3 @@ def build_admin_router(
         return PlainTextResponse("\n".join(lines) + "\n")
 
     return router
-

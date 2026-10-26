@@ -14,7 +14,9 @@ English README: [README.en.md](README.en.md)
 - **以极影视为准**：极影视里的记录就是真相，删除会同步（不再把旧进度塞回客户端）
 - **已看同步**：进度过阈值自动标记已看；剧集按集标记，整季标记也不会误伤
 - **音轨 / 字幕偏好**：把客户端的音轨与字幕选择写回极影视
-- **网页控制台**：首次打开设密码，之后可改阈值、写入间隔、开关、日志级别，即时生效
+- **网页控制台**：首次打开设密码；可改上游地址、阈值、写入间隔、开关、日志级别、IP 白名单，即时生效
+- **看得懂**：同步记录显示片名与文件名，可按片名/文件名/collection_id 搜索
+- **可诊断**：一键测试上游连通性、记录“被极影视覆盖/被清空”事件、显示正在播放的条目
 - **视频流零拷贝**：Range / HEAD / 206 原样透传，4K 拖动不额外占内存
 - **脱敏**：日志里不会出现 token、Authorization、api_key
 
@@ -40,17 +42,17 @@ services:
     container_name: zspace-emby-bridge
     restart: unless-stopped
     ports:
-      - "192.168.2.8:8022:8022"            # 绑 LAN IP；写 8022:8022 会和系统进程冲突
+      - "${BIND_IP:-0.0.0.0}:${BRIDGE_PORT:-8022}:${LISTEN_PORT:-8022}"
     environment:
-      UPSTREAM_URL: http://192.168.2.8:8021
+      UPSTREAM_URL: ${UPSTREAM_URL:-http://192.168.2.8:8021}
       NATIVE_MODE: local
       NATIVE_DB_PATH: /zvideo/zvideo.db
-      NATIVE_USER: "你的极空间账号"
+      NATIVE_USER: "${NATIVE_USER:?需要在 .env 里填极空间账号}"
       TZ: Asia/Shanghai
       LOG_LEVEL: INFO
     volumes:
-      - ./data:/data
-      - /zspace/zsrp/sqlite/zvideo:/zvideo
+      - ./config:/data                     # 配置与进度库，跟 compose 同目录
+      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
 ```
 
 ```bash
@@ -66,7 +68,11 @@ curl http://192.168.2.8:8022/healthz
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `UPSTREAM_URL` | `http://192.168.2.8:8021` | 极影视 Emby 接口 |
-| `LISTEN_PORT` | `8022` | 代理端口 |
+| `LISTEN_PORT` | `8022` | 容器内监听端口 |
+| `BRIDGE_PORT` | `8022` | 宿主对外端口（compose 用） |
+| `BIND_IP` | `0.0.0.0` | 宿主绑定地址；极空间上常写 `192.168.2.8` 避开系统占用 |
+| `NATIVE_DB_DIR` | `/zspace/zsrp/sqlite/zvideo` | 极影视库目录（compose 挂载用） |
+| `ALLOWED_IPS` | 空 | 面板 IP 白名单，逗号分隔 |
 | `DB_PATH` | `data/progress.db` | 本地进度库（写入缓冲/兜底） |
 | `LOG_LEVEL` | `INFO` | 日志级别，面板可改 |
 | `TZ` | `Asia/Shanghai` | 时区 |
@@ -84,9 +90,10 @@ curl http://192.168.2.8:8022/healthz
 打开 `http://<NAS>:8022/admin`：
 
 1. **首次打开**会要求设置管理密码（至少 6 位，PBKDF2 存库，不入日志）
-2. 登录后可改：原生写入开关、已看阈值、写库间隔、同步宽限、音轨字幕同步、日志级别
-3. 同一页面能看到：上游地址、本地记录数、累计上报、写库成功/失败、已看回写，以及最近同步列表
-4. `/metrics` 提供 Prometheus 文本指标
+2. 登录后可改：**上游地址（即时生效）**、原生写入开关、已看阈值、写库间隔、同步宽限、音轨字幕同步、日志级别、IP 白名单；还能改管理密码、导出 `.env` 片段
+3. 概览页能看到：正在播放的条目、最近同步（片名 + 文件名）、写库计数，以及「被极影视覆盖 / 被清空」事件
+4. 「工具」页支持用片名、文件名或 collection_id 查询条目与片头片尾区间
+5. `/metrics` 提供 Prometheus 文本指标
 
 ## Hills 配置
 
@@ -128,7 +135,7 @@ sudo sqlite3 'file:/zspace/zsrp/sqlite/zvideo/zvideo.db?mode=ro' \
 ## 已知限制
 
 - **单用户**：`NATIVE_USER` 固定一个极空间账号
-- **片头片尾**：`zvideo_skip` 只读展示在面板里；Emby 没有标准跳过接口，Hills 也不请求（实测无相关请求），因此**不会真的自动跳过**
+- **片头片尾**：只提供查询（面板与 API），本代理不介入 Hills 的跳过逻辑
 - **极影视升级**可能改表结构，写入会失败并打日志，不会自动改结构
 - 代理不解析视频内容，只处理 JSON 控制面与视频流透传
 

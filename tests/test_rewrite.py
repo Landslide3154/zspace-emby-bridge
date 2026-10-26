@@ -32,41 +32,46 @@ def test_upstream_record_always_wins() -> None:
         "RunTimeTicks": 60000000000,
         "UserData": {"PlaybackPositionTicks": 500000000, "LastPlayedDate": "2026-10-26T05:00:00Z"},
     }
-    merged, cleared = merge_user_data(item, LocalProgress(6000000000, UTC_EPOCH), now=UTC_EPOCH + 3600)
+    merged, cleared, overridden = merge_user_data(item, LocalProgress(6000000000, UTC_EPOCH), now=UTC_EPOCH + 3600)
     assert merged["UserData"]["PlaybackPositionTicks"] == 500000000
     assert cleared is False
+    assert overridden is True  # 上游把本地 6000 秒覆盖成 50 秒
 
 
 def test_upstream_played_wins() -> None:
     item = {"Id": "i1", "UserData": {"Played": True, "PlaybackPositionTicks": 0}}
-    merged, cleared = merge_user_data(item, LocalProgress(6000000000, UTC_EPOCH), now=UTC_EPOCH + 3600)
+    merged, cleared, overridden = merge_user_data(item, LocalProgress(6000000000, UTC_EPOCH), now=UTC_EPOCH + 3600)
     assert merged["UserData"]["Played"] is True
     assert merged["UserData"]["PlaybackPositionTicks"] == 0
     assert cleared is False
+    assert overridden is True
 
 
 def test_recent_local_fills_empty_upstream_with_grace() -> None:
     item = {"Id": "i1", "RunTimeTicks": 60000000000, "UserData": {"PlaybackPositionTicks": 0}}
-    merged, cleared = merge_user_data(item, LocalProgress(6000000000, UTC_EPOCH), now=UTC_EPOCH + 5)
+    merged, cleared, overridden = merge_user_data(item, LocalProgress(6000000000, UTC_EPOCH), now=UTC_EPOCH + 5)
     assert merged["UserData"]["PlaybackPositionTicks"] == 6000000000
     assert merged["UserData"]["PlayedPercentage"] == pytest.approx(10.0)
     assert cleared is False
+    assert overridden is False
     assert item["UserData"]["PlaybackPositionTicks"] == 0  # 入参不被改
 
 
 def test_stale_local_with_empty_upstream_is_cleared() -> None:
     """用户在极影视里删了观看记录：本地旧记录必须跟着清掉。"""
     item = {"Id": "i1", "RunTimeTicks": 60000000000, "UserData": {"PlaybackPositionTicks": 0}}
-    merged, cleared = merge_user_data(item, LocalProgress(6000000000, UTC_EPOCH), now=UTC_EPOCH + 60)
+    merged, cleared, overridden = merge_user_data(item, LocalProgress(6000000000, UTC_EPOCH), now=UTC_EPOCH + 60)
     assert cleared is True
+    assert overridden is False
     assert merged == item
 
 
 def test_merge_without_local_returns_equivalent_item() -> None:
     item = {"Id": "i1", "UserData": {"PlaybackPositionTicks": 42}}
-    merged, cleared = merge_user_data(item, None)
+    merged, cleared, overridden = merge_user_data(item, None)
     assert merged == item
     assert cleared is False
+    assert overridden is False
 
 
 def test_rewrite_walks_lists_and_keeps_other_fields() -> None:

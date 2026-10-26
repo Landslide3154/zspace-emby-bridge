@@ -201,6 +201,72 @@ class LocalSqliteWriter:
         finally:
             connection.close()
 
+    def lookup(self, item_ids: list[str]) -> dict[str, dict]:
+        """返回每个 item 的片名与文件名，取不到就留空。"""
+        found: dict[str, dict] = {}
+        connection = self._connect()
+        try:
+            for item_id in item_ids:
+                parsed = parse_item_id(item_id)
+                if parsed is None:
+                    continue
+                collection = connection.execute(
+                    "SELECT title FROM zvideo_collection WHERE user_name = ? AND collection_id = ? LIMIT 1",
+                    (self._user, parsed.collection_id),
+                ).fetchone()
+                if parsed.video_id:
+                    episode = connection.execute(
+                        "SELECT name FROM zvideo_list WHERE user_name = ? AND collection_id = ? AND video_id = ? LIMIT 1",
+                        (self._user, parsed.collection_id, parsed.video_id),
+                    ).fetchone()
+                else:
+                    episode = connection.execute(
+                        "SELECT name FROM zvideo_list WHERE user_name = ? AND collection_id = ? LIMIT 1",
+                        (self._user, parsed.collection_id),
+                    ).fetchone()
+                found[item_id] = {
+                    "title": collection["title"] if collection else None,
+                    "file": episode["name"] if episode else None,
+                }
+        finally:
+            connection.close()
+        return found
+
+    def search(self, query: str, limit: int = 20) -> list[dict]:
+        """按 collection_id、片名或文件名找条目。"""
+        text = (query or "").strip()
+        if not text:
+            return []
+        connection = self._connect()
+        try:
+            if re.fullmatch(r"[0-9a-fA-F]{6,32}", text):
+                rows = connection.execute(
+                    "SELECT c.collection_id, c.title, l.video_id, l.name FROM zvideo_collection c"
+                    " LEFT JOIN zvideo_list l ON l.user_name = c.user_name AND l.collection_id = c.collection_id"
+                    " WHERE c.user_name = ? AND c.collection_id = ? LIMIT ?",
+                    (self._user, text, limit),
+                ).fetchall()
+            else:
+                like = f"%{text}%"
+                rows = connection.execute(
+                    "SELECT c.collection_id, c.title, l.video_id, l.name FROM zvideo_collection c"
+                    " LEFT JOIN zvideo_list l ON l.user_name = c.user_name AND l.collection_id = c.collection_id"
+                    " WHERE c.user_name = ? AND (c.title LIKE ? OR l.name LIKE ?)"
+                    " GROUP BY c.collection_id ORDER BY MAX(c.updated) DESC LIMIT ?",
+                    (self._user, like, like, limit),
+                ).fetchall()
+        finally:
+            connection.close()
+        return [
+            {
+                "collection_id": row["collection_id"],
+                "video_id": row["video_id"],
+                "title": row["title"],
+                "file": row["name"],
+            }
+            for row in rows
+        ]
+
     def list_skips(self, collection_id: str) -> list[dict]:
         connection = self._connect()
         try:
@@ -308,6 +374,12 @@ class SshSqliteWriter:
         counts = self._counts(script)
         changed = counts.get("mark", 0)
         return WriteResult(changed, "" if changed else "not_in_library")
+
+    def lookup(self, item_ids: list[str]) -> dict[str, dict]:
+        return {item_id: {"title": None, "file": None} for item_id in item_ids if parse_item_id(item_id)}
+
+    def search(self, query: str, limit: int = 20) -> list[dict]:
+        return []
 
     def list_skips(self, collection_id: str) -> list[dict]:
         return []

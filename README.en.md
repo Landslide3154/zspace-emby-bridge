@@ -14,7 +14,9 @@
 - **极影视 is authoritative**: its record wins; if it is cleared, the local copy is cleared too
 - **Played sync**: marks watched past a threshold; per-episode for series, never whole-season by accident
 - **Audio / subtitle preference**: writes the client's selection back to 极影视
-- **Web console**: first visit asks for a password; then tune threshold, intervals, switches and log level on the fly
+- **Web console**: first visit asks for a password; change upstream URL, threshold, intervals, switches, log level, IP allowlist on the fly
+- **Readable**: sync rows show title and file name; search by title, file name or collection_id
+- **Diagnosable**: one-click upstream test, override/cleared events, currently playing items
 - **Zero-copy media**: Range / HEAD / 206 pass through untouched
 - **Redaction**: no tokens, Authorization or api_key in logs
 
@@ -38,17 +40,17 @@ services:
     container_name: zspace-emby-bridge
     restart: unless-stopped
     ports:
-      - "192.168.2.8:8022:8022"   # bind the LAN IP; plain 8022:8022 conflicts with a system service
+      - "${BIND_IP:-0.0.0.0}:${BRIDGE_PORT:-8022}:${LISTEN_PORT:-8022}"
     environment:
-      UPSTREAM_URL: http://192.168.2.8:8021
+      UPSTREAM_URL: ${UPSTREAM_URL:-http://192.168.2.8:8021}
       NATIVE_MODE: local
       NATIVE_DB_PATH: /zvideo/zvideo.db
-      NATIVE_USER: "your-zspace-account"
+      NATIVE_USER: "${NATIVE_USER:?set your ZSpace account in .env}"
       TZ: Asia/Shanghai
       LOG_LEVEL: INFO
     volumes:
-      - ./data:/data
-      - /zspace/zsrp/sqlite/zvideo:/zvideo
+      - ./config:/data            # settings and progress DB next to compose file
+      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
 ```
 
 ```bash
@@ -63,7 +65,11 @@ curl http://192.168.2.8:8022/healthz
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `UPSTREAM_URL` | `http://192.168.2.8:8021` | 极影视 Emby endpoint |
-| `LISTEN_PORT` | `8022` | proxy port |
+| `LISTEN_PORT` | `8022` | container listen port |
+| `BRIDGE_PORT` | `8022` | host port published by compose |
+| `BIND_IP` | `0.0.0.0` | host bind address (use the NAS LAN IP when 8022 is taken) |
+| `NATIVE_DB_DIR` | `/zspace/zsrp/sqlite/zvideo` | directory of the 极影视 database |
+| `ALLOWED_IPS` | – | console IP allowlist, comma separated |
 | `DB_PATH` | `data/progress.db` | local progress database |
 | `LOG_LEVEL` | `INFO` | log level (also editable in console) |
 | `PLAYED_THRESHOLD` | `0.9` | watched threshold |
@@ -124,7 +130,7 @@ sudo sqlite3 'file:/zspace/zsrp/sqlite/zvideo/zvideo.db?mode=ro' \
 ## Known limitations
 
 - Single user (`NATIVE_USER`)
-- Intro/outro ranges are shown read-only in the console; Emby has no standard skip API and Hills never requests one, so no automatic skipping
+- Intro/outro ranges are queryable in the console; this proxy does not touch Hills' skip behaviour
 - A 极影视 upgrade may change the schema; writes then fail loudly in logs instead of guessing
 - The proxy never parses media; only JSON control plane and byte streams
 

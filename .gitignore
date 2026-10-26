@@ -7,6 +7,7 @@ AGENTS.local.md
 # 本地配置与运行数据
 .env
 data/
+config/
 *.db
 *.db-wal
 *.db-shm

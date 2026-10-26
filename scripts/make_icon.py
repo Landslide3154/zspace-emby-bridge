@@ -115,6 +115,13 @@ def compose(size: int, variant: str = "bridge", plate_color: tuple[int, int, int
     ss = 4
     plate = plate_mask(size, ss)
     glyph = glyph_mask(size, variant, ss)
+    # 剪影占底板比例：0.72 → 0.60，整体缩小、重心略上移
+    shrink = 0.88
+    small = max(1, int(size * shrink))
+    glyph = glyph.resize((small, small), Image.LANCZOS)
+    canvas_glyph = Image.new("L", (size, size), 0)
+    canvas_glyph.paste(glyph, ((size - small) // 2, (size - small) // 2 - int(size * 0.01)))
+    glyph = canvas_glyph
 
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     base = Image.new("RGBA", (size, size), plate_color + (255,))

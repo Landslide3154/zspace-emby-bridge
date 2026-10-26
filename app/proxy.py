@@ -203,8 +203,13 @@ class UpstreamProxy:
             password=settings.ssh_password,
         )
         self._last_native: dict[str, float] = {}
-        self._client = httpx.AsyncClient(
-            base_url=settings.upstream_url,
+        self._sessions: dict[str, dict] = {}
+        upstream = runtime.options.upstream_url if runtime is not None else settings.upstream_url
+        self._client = self._build_client(upstream)
+
+    def _build_client(self, upstream: str) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=upstream,
             # read 不设上限：暂停播放时连接会长时间空闲，超时会把视频流掐断
             timeout=httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0),
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=8),
@@ -215,6 +220,46 @@ class UpstreamProxy:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def set_upstream(self, upstream: str) -> None:
+        """换上游地址：重建连接池，旧请求不受影响。"""
+        old = self._client
+        self._client = self._build_client(upstream)
+        await old.aclose()
+
+    @property
+    def upstream_url(self) -> str:
+        return str(self._client.base_url).rstrip("/")
+
+    async def test_upstream(self) -> dict:
+        started = time.perf_counter()
+        try:
+            response = await self._client.get("/System/Info/Public", timeout=5.0)
+            elapsed = round((time.perf_counter() - started) * 1000)
+            payload = response.json() if response.status_code == 200 else {}
+            return {
+                "ok": response.status_code == 200,
+                "status": response.status_code,
+                "ms": elapsed,
+                "server": payload.get("ServerName"),
+                "version": payload.get("Version"),
+            }
+        except Exception as exc:  # 网络问题直接回报给面板
+            return {"ok": False, "error": type(exc).__name__, "ms": round((time.perf_counter() - started) * 1000)}
+
+    def sessions_view(self) -> list[dict]:
+        now = time.time()
+        active = [
+            {
+                "item_id": item_id,
+                "position_ticks": info["position_ticks"],
+                "user_id": info.get("user_id"),
+                "active_for": round(now - info["updated_at"]),
+            }
+            for item_id, info in self._sessions.items()
+            if now - info["updated_at"] < 180
+        ]
+        return sorted(active, key=lambda entry: entry["active_for"])
 
     @property
     def writer(self):
@@ -240,6 +285,7 @@ class UpstreamProxy:
         event = parse_progress_event(request.method, request.url.path, request.url.query, body)
         if event is not None:
             self._record(event, token_id, user_id)
+            self._track_session(event)
             self._maybe_write_back(event, token_id, user_id, token)
             self._sync_native(event)
 
@@ -302,7 +348,8 @@ class UpstreamProxy:
             payload,
             lambda item_id: self._local_progress(token_id, item_id),
             grace=self._option('sync_grace_seconds', 15.0),
-            on_clear=lambda item_id: self._store.delete(token_id, item_id),
+            on_clear=lambda item_id: self._clear_local(token_id, item_id),
+            on_override=lambda item_id: self._record_override(token_id, item_id),
         )
         runtimes = collect_runtimes(rewritten)
         if runtimes:
@@ -311,6 +358,18 @@ class UpstreamProxy:
         data = json.dumps(rewritten, ensure_ascii=False).encode("utf-8")
         headers["content-type"] = "application/json; charset=utf-8"
         return Response(content=data, status_code=upstream.status_code, headers=headers)
+
+    def _clear_local(self, token_id: str, item_id: str) -> None:
+        record = self._store.get(token_id, item_id)
+        self._store.delete(token_id, item_id)
+        self._store.add_event("cleared", item_id, None, "极影视记录已清空，本地同步删除")
+        logger.info("本地记录随极影视一起清空 item=%s (was %s)", item_id, record.position_ticks if record else 0)
+
+    def _record_override(self, token_id: str, item_id: str) -> None:
+        record = self._store.get(token_id, item_id)
+        detail = f"极影视进度覆盖本地（本地 {record.position_ticks if record else 0} ticks）"
+        self._store.add_event("override", item_id, None, detail)
+        logger.info("极影视进度覆盖本地 item=%s", item_id)
 
     def _local_progress(self, token_id: str, item_id: str) -> LocalProgress | None:
         record = self._store.get(token_id, item_id)
@@ -337,6 +396,18 @@ class UpstreamProxy:
             user_id,
             event.body_summary,
         )
+
+    def _track_session(self, event: ProgressEvent) -> None:
+        if not event.item_id:
+            return
+        if event.path.rstrip("/").lower().endswith("/stopped"):
+            self._sessions.pop(event.item_id, None)
+            return
+        self._sessions[event.item_id] = {
+            "position_ticks": event.position_ticks or 0,
+            "user_id": None,
+            "updated_at": time.time(),
+        }
 
     def _maybe_write_back(
         self, event: ProgressEvent, token_id: str, user_id: str | None, token: str | None

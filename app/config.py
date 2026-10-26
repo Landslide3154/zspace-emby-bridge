@@ -25,6 +25,7 @@ class Settings:
     sync_grace_seconds: float = 15.0
     sync_stream_prefs: bool = True
     admin_password: str = ""
+    allowed_ips: str = ""
     ssh_host: str = ""
     ssh_port: int = 22
     ssh_user: str = ""
@@ -65,6 +66,7 @@ class Settings:
             sync_grace_seconds=_float_value(source.get("SYNC_GRACE_SECONDS"), 15.0, "SYNC_GRACE_SECONDS"),
             sync_stream_prefs=(source.get("SYNC_STREAM_PREFS") or "true").strip().lower() not in {"0", "false", "no"},
             admin_password=source.get("ADMIN_PASSWORD") or "",
+            allowed_ips=(source.get("ALLOWED_IPS") or "").strip(),
             ssh_host=ssh_host,
             ssh_port=_int_value(source.get("ZSPACE_SSH_PORT"), 22, "ZSPACE_SSH_PORT"),
             ssh_user=(source.get("ZSPACE_SSH_USER") or "").strip(),

@@ -87,16 +87,22 @@ def merge_user_data(
     返回（合并后的条目, 是否需要清掉本地记录）。
     """
     if local is None:
-        return item, False
+        return item, False, False
     user_data = item.get("UserData")
     if not isinstance(user_data, dict):
         user_data = {}
     if _upstream_has_record(user_data):
-        return item, False
+        upstream_position = user_data.get("PlaybackPositionTicks")
+        overridden = (
+            isinstance(upstream_position, (int, float))
+            and not isinstance(upstream_position, bool)
+            and abs(upstream_position - local.position_ticks) >= 10_000_000
+        )
+        return item, False, overridden
     current = time.time() if now is None else now
     if current - local.updated_at > grace:
         # 上游明确没有这条记录，本地又早已写入 → 用户在极影视里清掉了，跟着清
-        return item, True
+        return item, True, False
 
     merged_data = dict(user_data)
     merged_data["PlaybackPositionTicks"] = local.position_ticks
@@ -107,7 +113,7 @@ def merge_user_data(
         merged_data["Played"] = True
     merged_item = dict(item)
     merged_item["UserData"] = merged_data
-    return merged_item, False
+    return merged_item, False, False
 
 
 def rewrite_payload(
@@ -117,9 +123,10 @@ def rewrite_payload(
     now: float | None = None,
     grace: float = 15.0,
     on_clear: Callable[[str], None] | None = None,
+    on_override: Callable[[str], None] | None = None,
 ) -> Any:
     """递归重写所有带 Id + UserData 的条目；其余字段原样保留。"""
-    return _walk(payload, resolver, time.time() if now is None else now, grace, on_clear)
+    return _walk(payload, resolver, time.time() if now is None else now, grace, on_clear, on_override)
 
 
 def collect_runtimes(payload: Any) -> dict[str, int]:
@@ -148,17 +155,20 @@ def _walk(
     now: float,
     grace: float,
     on_clear: Callable[[str], None] | None,
+    on_override: Callable[[str], None] | None = None,
 ) -> Any:
     if isinstance(node, dict):
         item_id = node.get("Id")
         if isinstance(item_id, str) and isinstance(node.get("UserData"), dict):
-            merged, cleared = merge_user_data(node, resolver(item_id), now=now, grace=grace)
+            merged, cleared, overridden = merge_user_data(node, resolver(item_id), now=now, grace=grace)
             if cleared and on_clear is not None:
                 on_clear(item_id)
+            if overridden and on_override is not None:
+                on_override(item_id)
             node = merged
-        return {key: _walk(value, resolver, now, grace, on_clear) for key, value in node.items()}
+        return {key: _walk(value, resolver, now, grace, on_clear, on_override) for key, value in node.items()}
     if isinstance(node, list):
-        return [_walk(entry, resolver, now, grace, on_clear) for entry in node]
+        return [_walk(entry, resolver, now, grace, on_clear, on_override) for entry in node]
     return node
 
 
