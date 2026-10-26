@@ -33,7 +33,91 @@ Sync rule: if 极影视 has a record, it wins. If it is explicitly empty and the
 
 Requires `/zspace/zsrp/sqlite/zvideo/zvideo.db` on the host (created by 极影视). The container must run as root to write it — Docker's default.
 
-### Option 1: pull the Docker Hub image (recommended)
+### Layout
+
+`.env` must sit in the **same directory** as `docker-compose.yml` (`env_file` and the `${...}` interpolation both resolve against the compose file's directory):
+
+```
+<project dir>/
+├── docker-compose.yml
+├── .env                ← next to the compose file, name must be .env
+└── config/             ← created on first start: console password, progress DB
+```
+
+On ZSpace, Docker-created projects live under
+`/tmp/zfsv3/nvme12/<account>/data/docker/<project>/` (same place as jackett and komga).
+
+### 1. `docker-compose.yml` (annotated, copy as-is)
+
+```yaml
+services:
+  bridge:
+    # keep this if Docker Hub is reachable; otherwise use docker.1ms.run/snarl6818/zspace-emby-bridge:latest
+    image: snarl6818/zspace-emby-bridge:latest
+    container_name: zspace-emby-bridge
+    restart: unless-stopped
+    ports:
+      # all three values come from .env. Leaving BIND_IP empty binds 0.0.0.0,
+      # which collides with whatever already owns 127.0.0.1:8022
+      - "${BIND_IP:-0.0.0.0}:${BRIDGE_PORT:-8022}:${LISTEN_PORT:-8022}"
+    env_file:
+      - .env                                  # variables and account live here
+    environment:
+      NATIVE_MODE: local                      # write 极影视's DB from inside the container
+      NATIVE_DB_PATH: /zvideo/zvideo.db       # in-container path, matches the mount below
+      DB_PATH: /data/progress.db              # local progress DB, kept in ./config
+    volumes:
+      - ./config:/data                        # settings + progress DB next to the compose file
+      # NATIVE_DB_DIR already defaults to the 极影视 directory, usually leave it
+      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
+```
+
+### 2. `.env` (annotated, only three values are required)
+
+```ini
+# [required 1] 极影视 Emby endpoint
+UPSTREAM_URL=http://192.168.2.8:8021
+
+# [required 2] ZSpace account (the user_name inside zvideo.db)
+NATIVE_USER=
+
+# [required 3] bind address: on ZSpace use the NAS LAN IP; 0.0.0.0 collides
+# with the process already listening on 127.0.0.1:8022
+BIND_IP=192.168.2.8
+
+# ↓ defaults below, no need to change ↓
+LISTEN_PORT=8022                  # container listen port
+BRIDGE_PORT=8022                  # published port (use 8023 if taken, then update clients)
+NATIVE_DB_DIR=/zspace/zsrp/sqlite/zvideo
+LOG_LEVEL=INFO
+TZ=Asia/Shanghai
+PLAYED_THRESHOLD=0.9              # watched threshold
+NATIVE_MIN_INTERVAL=10            # min seconds between DB writes
+SYNC_GRACE_SECONDS=15             # grace window for local records
+SYNC_STREAM_PREFS=true            # sync audio/subtitle selection
+ALLOWED_IPS=                      # console IP allowlist, comma separated, empty = no limit
+ADMIN_PASSWORD=                   # empty = set on first visit to /admin; or preset it (>= 6 chars)
+```
+
+`NATIVE_MODE` / `NATIVE_DB_PATH` / `DB_PATH` are pinned in the compose `environment` block, so leave them out of `.env`.
+
+### 3. Start
+
+```bash
+docker compose config | head -20        # variables resolved as expected?
+docker compose up -d
+docker compose logs -f --tail=50
+curl http://192.168.2.8:8022/healthz    # expect native_mode=local
+```
+
+Open `http://192.168.2.8:8022/admin`, set the console password, then point Hills at that address.
+
+> If the image pull times out, swap `image:` for the mirror:
+> `docker.1ms.run/snarl6818/zspace-emby-bridge:latest`
+
+### Fallback: your UI cannot create `.env`
+
+`.env` is a dotfile and some Docker GUIs refuse to create one. You can skip it entirely and inline the values — only three spots are `[fill]`:
 
 ```yaml
 services:
@@ -42,37 +126,28 @@ services:
     container_name: zspace-emby-bridge
     restart: unless-stopped
     ports:
-      - "${BIND_IP:-0.0.0.0}:${BRIDGE_PORT:-8022}:${LISTEN_PORT:-8022}"
-    env_file:
-      - .env
+      - "192.168.2.8:8022:8022"                # [fill] host IP : published port : container port
     environment:
+      UPSTREAM_URL: http://192.168.2.8:8021    # [fill] 极影视 Emby endpoint
+      NATIVE_USER: ""                          # [fill] ZSpace account (user_name)
       NATIVE_MODE: local
       NATIVE_DB_PATH: /zvideo/zvideo.db
       DB_PATH: /data/progress.db
+      LISTEN_PORT: "8022"
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+      PLAYED_THRESHOLD: "0.9"
+      NATIVE_MIN_INTERVAL: "10"
+      SYNC_GRACE_SECONDS: "15"
+      SYNC_STREAM_PREFS: "true"
+      ALLOWED_IPS: ""
+      ADMIN_PASSWORD: ""
     volumes:
-      - ./config:/data                                    # settings + progress DB next to the compose file
-      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
+      - ./config:/data
+      - /zspace/zsrp/sqlite/zvideo:/zvideo
 ```
 
-`.env` (copy `.env.example`, three values are enough to start):
-
-```ini
-UPSTREAM_URL=http://192.168.2.8:8021   # 极影视 Emby endpoint
-NATIVE_USER=your-zspace-account       # required, the user_name inside zvideo.db
-BIND_IP=192.168.2.8                   # bind the NAS LAN IP to avoid the port taken on 127.0.0.1
-```
-
-```bash
-docker compose up -d
-curl http://192.168.2.8:8022/healthz    # expect native_mode=local
-```
-
-Open `http://192.168.2.8:8022/admin`, set the console password, then point Hills at that address.
-
-> Behind the Great Firewall, swap `image:` for the mirror:
-> `docker.1ms.run/snarl6818/zspace-emby-bridge:latest`
-
-### Option 2: build it yourself
+### Build it yourself
 
 ```bash
 docker build -t zspace-emby-bridge:local .

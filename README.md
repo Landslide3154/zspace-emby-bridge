@@ -35,7 +35,91 @@ Hills ──▶ 本代理 :8022 ──▶ 极影视 Emby :8021   读接口 / 图
 
 前提：宿主机上有极影视的库 `/zspace/zsrp/sqlite/zvideo/zvideo.db`（装过极影视就有）。容器以 root 运行才能写它，Docker 默认就是 root。
 
-### 方式一：拉 Docker Hub 镜像（推荐）
+### 目录结构
+
+`.env` 必须和 `docker-compose.yml` 在**同一个目录**（`env_file` 和 `${...}` 插值都相对 compose 文件所在目录解析）：
+
+```
+<项目目录>/
+├── docker-compose.yml
+├── .env                ← 和 compose 同级，文件名必须是 .env
+└── config/             ← 首次启动自动生成：面板密码、进度库
+```
+
+极空间上用 Docker 界面建的项目，目录一般是
+`/tmp/zfsv3/nvme12/<账号>/data/docker/<项目名>/`（和 jackett、komga 同级）。
+
+### 1. `docker-compose.yml`（注释版，复制即用）
+
+```yaml
+services:
+  bridge:
+    # 能直连 Docker Hub 用这个；拉取超时就换 docker.1ms.run/snarl6818/zspace-emby-bridge:latest
+    image: snarl6818/zspace-emby-bridge:latest
+    container_name: zspace-emby-bridge
+    restart: unless-stopped
+    ports:
+      # 三个变量都从 .env 读。BIND_IP 留空会绑 0.0.0.0，
+      # 撞上系统已占用的 127.0.0.1:8022 就起不来
+      - "${BIND_IP:-0.0.0.0}:${BRIDGE_PORT:-8022}:${LISTEN_PORT:-8022}"
+    env_file:
+      - .env                                  # 变量与账号都在这里
+    environment:
+      NATIVE_MODE: local                      # 容器内直接写极影视的库
+      NATIVE_DB_PATH: /zvideo/zvideo.db       # 容器内路径，对应下面的挂载
+      DB_PATH: /data/progress.db              # 本地进度库，落在 ./config 里
+    volumes:
+      - ./config:/data                        # 配置与进度库，跟 compose 同目录
+      # NATIVE_DB_DIR 默认就是极空间的库目录，一般不用改
+      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
+```
+
+### 2. `.env`（注释版，只有三项必填）
+
+```ini
+# 【必填 1】极影视的 Emby 接口地址
+UPSTREAM_URL=http://192.168.2.8:8021
+
+# 【必填 2】极空间账号（极影视库里的 user_name）
+NATIVE_USER=
+
+# 【必填 3】绑定地址：极空间上必须写本机 LAN IP；
+# 写 0.0.0.0 会和系统进程抢 127.0.0.1:8022 导致启动失败
+BIND_IP=192.168.2.8
+
+# ↓↓↓ 以下保持默认即可，不用改 ↓↓↓
+LISTEN_PORT=8022                  # 容器内监听端口
+BRIDGE_PORT=8022                  # 对外端口（被占就改 8023，客户端地址同步改）
+NATIVE_DB_DIR=/zspace/zsrp/sqlite/zvideo
+LOG_LEVEL=INFO
+TZ=Asia/Shanghai
+PLAYED_THRESHOLD=0.9              # 已看阈值
+NATIVE_MIN_INTERVAL=10            # 写库最小间隔（秒）
+SYNC_GRACE_SECONDS=15             # 本地记录宽限期（秒）
+SYNC_STREAM_PREFS=true            # 是否同步音轨/字幕偏好
+ALLOWED_IPS=                      # 面板 IP 白名单，逗号分隔，留空不限制
+ADMIN_PASSWORD=                   # 留空＝首次打开 /admin 时设置；也可直接填 ≥6 位
+```
+
+`NATIVE_MODE` / `NATIVE_DB_PATH` / `DB_PATH` 已经在 compose 的 `environment` 里固定，不用写进 `.env`（写了也会被那三行覆盖）。
+
+### 3. 启动
+
+```bash
+docker compose config | head -20        # 确认 BIND_IP / UPSTREAM_URL 已代入
+docker compose up -d
+docker compose logs -f --tail=50        # 看有没有报错
+curl http://192.168.2.8:8022/healthz    # 应返回 native_mode=local
+```
+
+首次打开 `http://192.168.2.8:8022/admin` 设管理密码，再把客户端指向这个地址。
+
+> 拉镜像超时（国内常见）就把 `image:` 换成镜像站：
+> `docker.1ms.run/snarl6818/zspace-emby-bridge:latest`
+
+### 兜底：界面里不方便创建 `.env`
+
+`.env` 是隐藏文件，有些 Docker 图形界面不好新建。这种情况可以不用 `.env`，把值直接写进 compose，效果完全一样——只有三处 `【填】`：
 
 ```yaml
 services:
@@ -44,37 +128,28 @@ services:
     container_name: zspace-emby-bridge
     restart: unless-stopped
     ports:
-      - "${BIND_IP:-0.0.0.0}:${BRIDGE_PORT:-8022}:${LISTEN_PORT:-8022}"
-    env_file:
-      - .env
+      - "192.168.2.8:8022:8022"                # 【填】本机 IP : 对外端口 : 容器端口
     environment:
+      UPSTREAM_URL: http://192.168.2.8:8021    # 【填】极影视 Emby 接口
+      NATIVE_USER: ""                          # 【填】极空间账号（user_name）
       NATIVE_MODE: local
       NATIVE_DB_PATH: /zvideo/zvideo.db
       DB_PATH: /data/progress.db
+      LISTEN_PORT: "8022"
+      LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+      PLAYED_THRESHOLD: "0.9"
+      NATIVE_MIN_INTERVAL: "10"
+      SYNC_GRACE_SECONDS: "15"
+      SYNC_STREAM_PREFS: "true"
+      ALLOWED_IPS: ""
+      ADMIN_PASSWORD: ""
     volumes:
-      - ./config:/data                                    # 配置与进度库，跟 compose 同目录
-      - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
+      - ./config:/data
+      - /zspace/zsrp/sqlite/zvideo:/zvideo
 ```
 
-`.env`（照 `.env.example` 抄，最少填这三项）：
-
-```ini
-UPSTREAM_URL=http://192.168.2.8:8021   # 极影视 Emby 接口
-NATIVE_USER=你的极空间账号              # 必填，zvideo 库里的 user_name
-BIND_IP=192.168.2.8                    # 极空间上写本机 LAN IP，避开系统占用的 127.0.0.1
-```
-
-```bash
-docker compose up -d
-curl http://192.168.2.8:8022/healthz    # 应返回 native_mode=local
-```
-
-首次打开 `http://192.168.2.8:8022/admin` 设管理密码，再把 Hills 连到这个地址。
-
-> 国内直连 Docker Hub 拉不动时，用加速地址把 `image:` 换掉即可：
-> `docker.1ms.run/snarl6818/zspace-emby-bridge:latest`
-
-### 方式二：自己构建
+### 自己构建
 
 ```bash
 docker build -t zspace-emby-bridge:local .
