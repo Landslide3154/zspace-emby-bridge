@@ -17,6 +17,15 @@ class Settings:
     log_level: str
     tz: str
     played_threshold: float
+    # 原生进度写入（直接更新极影视的 zvideo_playlist）
+    native_mode: str = "off"
+    native_db_path: str = "/zspace/zsrp/sqlite/zvideo/zvideo.db"
+    native_user: str = ""
+    native_min_interval: float = 10.0
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_user: str = ""
+    ssh_password: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -34,6 +43,11 @@ class Settings:
         if not 0.0 <= threshold <= 1.0:
             raise ValueError(f"PLAYED_THRESHOLD 必须在 0 到 1 之间：{threshold}")
 
+        ssh_host = (source.get("ZSPACE_SSH_HOST") or "").strip()
+        native_mode = (source.get("NATIVE_MODE") or ("ssh" if ssh_host else "off")).strip().lower()
+        if native_mode not in {"off", "local", "ssh"}:
+            raise ValueError(f"NATIVE_MODE 只能是 off/local/ssh：{native_mode!r}")
+
         return cls(
             upstream_url=upstream,
             listen_port=port,
@@ -41,6 +55,14 @@ class Settings:
             log_level=(source.get("LOG_LEVEL") or "INFO").strip().upper(),
             tz=(source.get("TZ") or "Asia/Shanghai").strip(),
             played_threshold=threshold,
+            native_mode=native_mode,
+            native_db_path=(source.get("NATIVE_DB_PATH") or "/zspace/zsrp/sqlite/zvideo/zvideo.db").strip(),
+            native_user=(source.get("NATIVE_USER") or source.get("ZSPACE_USER") or "").strip(),
+            native_min_interval=_float_value(source.get("NATIVE_MIN_INTERVAL"), 10.0, "NATIVE_MIN_INTERVAL"),
+            ssh_host=ssh_host,
+            ssh_port=_int_value(source.get("ZSPACE_SSH_PORT"), 22, "ZSPACE_SSH_PORT"),
+            ssh_user=(source.get("ZSPACE_SSH_USER") or "").strip(),
+            ssh_password=source.get("ZSPACE_PASS") or "",
         )
 
 

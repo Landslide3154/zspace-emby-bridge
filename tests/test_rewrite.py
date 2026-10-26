@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import pytest
 
-from app.rewrite import LocalProgress, is_rewritable_path, merge_user_data, parse_iso8601, rewrite_payload
+from app.rewrite import (
+    LocalProgress,
+    collect_runtimes,
+    is_rewritable_path,
+    merge_user_data,
+    parse_iso8601,
+    rewrite_payload,
+)
 
 # 2026-10-26T05:15:25Z
 UTC_EPOCH = 1792991725.0
@@ -81,6 +88,22 @@ def test_path_gate() -> None:
     assert is_rewritable_path("/emby/Users/u1/Items/i1") is True
     assert is_rewritable_path("/Users/u1/Items/i1") is True
     assert is_rewritable_path("/emby/Users/Me/Items/i1") is True
-    assert is_rewritable_path("/emby/Users/u1/Items/Resume") is False  # M2
+    assert is_rewritable_path("/emby/Users/u1/Items") is True
+    assert is_rewritable_path("/emby/Users/u1/Items/Resume") is True
+    assert is_rewritable_path("/emby/Users/u1/Items/Latest") is True
+    assert is_rewritable_path("/emby/Users/Me/Items/Resume") is True
     assert is_rewritable_path("/Videos/v1/stream.mkv") is False
     assert is_rewritable_path("/emby/Items/i1/PlaybackInfo") is False
+    assert is_rewritable_path("/emby/Items/i1/Images/Primary") is False
+
+
+def test_collect_runtimes_walks_nested_payload() -> None:
+    payload = {
+        "Items": [
+            {"Id": "i1", "RunTimeTicks": 60000000000},
+            {"Id": "i2", "UserData": {"ItemId": "i1"}},
+        ],
+        "Id": "parent",
+        "RunTimeTicks": 10000000,
+    }
+    assert collect_runtimes(payload) == {"i1": 60000000000, "parent": 10000000}

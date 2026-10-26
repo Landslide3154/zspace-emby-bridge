@@ -50,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "version": VERSION,
             "uptime_seconds": round(time.monotonic() - STARTED_AT, 1),
             "progress_records": store.count(),
+            "native_mode": settings.native_mode,
         }
 
     @app.get("/debug/recent")

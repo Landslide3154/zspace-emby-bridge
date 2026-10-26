@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,11 @@ CREATE TABLE IF NOT EXISTS progress (
     PRIMARY KEY (token_hash, item_id)
 );
 CREATE INDEX IF NOT EXISTS idx_progress_updated_at ON progress(updated_at DESC);
+CREATE TABLE IF NOT EXISTS item_runtime (
+    item_id       TEXT PRIMARY KEY,
+    runtime_ticks INTEGER NOT NULL,
+    updated_at    REAL NOT NULL
+);
 """
 
 
@@ -104,6 +110,43 @@ class ProgressStore:
                 "SELECT * FROM progress WHERE token_hash = ? AND item_id = ?", (token_id, item_id)
             ).fetchone()
         return _to_record(row) if row is not None else None
+
+    def save_runtimes(self, runtimes: dict[str, int]) -> None:
+        """缓存条目时长：进度上报时用来算百分比，进而决定是否回写“已看”。"""
+        if not runtimes:
+            return
+        now = time.time()
+        rows = [(item_id, int(ticks), now) for item_id, ticks in runtimes.items()]
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT INTO item_runtime (item_id, runtime_ticks, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    runtime_ticks = excluded.runtime_ticks,
+                    updated_at = excluded.updated_at
+                """,
+                rows,
+            )
+
+    def get_runtime(self, item_id: str) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT runtime_ticks FROM item_runtime WHERE item_id = ?", (item_id,)
+            ).fetchone()
+        return int(row["runtime_ticks"]) if row is not None else None
+
+    def claim_played(self, token_id: str, item_id: str) -> bool:
+        """把“已看回写”做成一次性：只有第一次返回 True。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT played FROM progress WHERE token_hash = ? AND item_id = ?", (token_id, item_id)
+            ).fetchone()
+            if row is None or row["played"]:
+                return False
+            self._conn.execute(
+                "UPDATE progress SET played = 1 WHERE token_hash = ? AND item_id = ?", (token_id, item_id)
+            )
+            return True
 
     def recent(self, limit: int = 20) -> list[dict]:
         if limit <= 0:

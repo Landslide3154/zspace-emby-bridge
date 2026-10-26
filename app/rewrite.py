@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
-# 单条目详情：/Users/{uid}/Items/{id}，/emby 前缀可有可无
+# 单条目：/Users/{uid}/Items/{id}；列表：/Users/{uid}/Items[/Resume|/Latest] 或 /Items
 _ITEM_PATH = re.compile(r"^/(?:emby/)?users/[^/]+/items/(?P<item>[^/?]+)/?$", re.IGNORECASE)
+_LIST_PATH = re.compile(r"^/(?:emby/)?(?:users/[^/]+/)?items(?:/(?:resume|latest))?/?$", re.IGNORECASE)
 _RESERVED_ITEMS = frozenset({"resume", "latest", "count"})
 
 _ISO8601 = re.compile(
@@ -56,9 +57,11 @@ def parse_iso8601(value: Any) -> float | None:
 
 
 def is_rewritable_path(path: str) -> bool:
-    """M1 只重写单条目详情；列表/Resume 留给 M2。"""
+    """单条目详情、列表、Resume、Latest 都重写；媒体流与其它接口不碰。"""
     match = _ITEM_PATH.match(path)
-    return match is not None and match.group("item").lower() not in _RESERVED_ITEMS
+    if match is not None and match.group("item").lower() not in _RESERVED_ITEMS:
+        return True
+    return _LIST_PATH.match(path) is not None
 
 
 def merge_user_data(item: dict[str, Any], local: LocalProgress | None) -> dict[str, Any]:
@@ -88,6 +91,26 @@ def merge_user_data(item: dict[str, Any], local: LocalProgress | None) -> dict[s
 def rewrite_payload(payload: Any, resolver: Callable[[str], LocalProgress | None]) -> Any:
     """递归重写所有带 Id + UserData 的条目；其余字段原样保留。"""
     return _walk(payload, resolver)
+
+
+def collect_runtimes(payload: Any) -> dict[str, int]:
+    """收集响应里所有条目的运行时长，供进度上报时算百分比。"""
+    found: dict[str, int] = {}
+    _collect_runtimes(payload, found)
+    return found
+
+
+def _collect_runtimes(node: Any, found: dict[str, int]) -> None:
+    if isinstance(node, dict):
+        item_id = node.get("Id")
+        runtime = node.get("RunTimeTicks")
+        if isinstance(item_id, str) and isinstance(runtime, int) and not isinstance(runtime, bool) and runtime > 0:
+            found[item_id] = runtime
+        for value in node.values():
+            _collect_runtimes(value, found)
+    elif isinstance(node, list):
+        for entry in node:
+            _collect_runtimes(entry, found)
 
 
 def _walk(node: Any, resolver: Callable[[str], LocalProgress | None]) -> Any:

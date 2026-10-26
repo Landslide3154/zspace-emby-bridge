@@ -1,6 +1,7 @@
-"""请求转发与观测：M0 只做透传，但把控制面动静记清楚。"""
+"""请求转发与观测：进度落本地库，读条目时把本地进度写回响应。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -16,8 +17,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from .config import Settings
+from .native import build_writer, parse_item_id
 from .redact import redact_json, redact_url
-from .rewrite import LocalProgress, is_rewritable_path, rewrite_payload
+from .rewrite import LocalProgress, collect_runtimes, is_rewritable_path, rewrite_payload
 from .store import ProgressStore, token_hash
 
 logger = logging.getLogger("bridge.proxy")
@@ -40,12 +42,16 @@ def extract_token(request: Request) -> str | None:
     return match.group(1) if match else None
 
 
-def extract_user_id(path: str) -> str | None:
+def extract_user_id(path: str, query: str = "") -> str | None:
+    """用户 id：优先路径里的 {uid}，否则取 query 的 UserId（Hills 的 Sessions/* 走这条）。"""
     match = _USER_IN_PATH.match(path)
-    if match is None:
-        return None
-    user = match.group(1)
-    return None if user.lower() == "me" else user
+    if match is not None:
+        user = match.group(1)
+        return None if user.lower() == "me" else user
+    for key, values in parse_qs(query, keep_blank_values=True).items():
+        if key.lower() == "userid" and values:
+            return values[0]
+    return None
 
 # 逐跳头不能转发，否则破坏连接语义
 HOP_BY_HOP = frozenset(
@@ -175,6 +181,17 @@ class UpstreamProxy:
     def __init__(self, settings: Settings, store: ProgressStore) -> None:
         self._settings = settings
         self._store = store
+        self._tasks: set[asyncio.Task] = set()
+        self._writer = build_writer(
+            settings.native_mode,
+            db_path=settings.native_db_path,
+            user_name=settings.native_user,
+            host=settings.ssh_host,
+            port=settings.ssh_port,
+            ssh_user=settings.ssh_user,
+            password=settings.ssh_password,
+        )
+        self._last_native: dict[str, float] = {}
         self._client = httpx.AsyncClient(
             base_url=settings.upstream_url,
             # read 不设上限：暂停播放时连接会长时间空闲，超时会把视频流掐断
@@ -195,11 +212,13 @@ class UpstreamProxy:
 
         token = extract_token(request)
         token_id = token_hash(token) if token else ""
-        user_id = extract_user_id(request.url.path)
+        user_id = extract_user_id(request.url.path, request.url.query)
 
         event = parse_progress_event(request.method, request.url.path, request.url.query, body)
         if event is not None:
             self._record(event, token_id, user_id)
+            self._maybe_write_back(event, token_id, user_id, token)
+            self._sync_native(event)
 
         headers = {key: value for key, value in request.headers.items() if key.lower() not in HOP_BY_HOP}
         outgoing = self._client.build_request(request.method, target, headers=headers, content=body)
@@ -257,6 +276,10 @@ class UpstreamProxy:
         except (json.JSONDecodeError, UnicodeDecodeError):
             return Response(content=raw, status_code=upstream.status_code, headers=headers)
         rewritten = rewrite_payload(payload, lambda item_id: self._local_progress(token_id, item_id))
+        runtimes = collect_runtimes(rewritten)
+        if runtimes:
+            self._store.save_runtimes(runtimes)
+            logger.debug("缓存时长 %s", {key: round(value / 1e7, 1) for key, value in runtimes.items()})
         data = json.dumps(rewritten, ensure_ascii=False).encode("utf-8")
         headers["content-type"] = "application/json; charset=utf-8"
         return Response(content=data, status_code=upstream.status_code, headers=headers)
@@ -284,3 +307,104 @@ class UpstreamProxy:
             user_id,
             event.body_summary,
         )
+
+    def _maybe_write_back(
+        self, event: ProgressEvent, token_id: str, user_id: str | None, token: str | None
+    ) -> None:
+        if not token or not user_id or not event.item_id or event.position_ticks is None:
+            return
+        runtime = self._store.get_runtime(event.item_id)
+        if runtime is None or runtime <= 0:
+            return
+        if event.position_ticks / runtime < self._settings.played_threshold:
+            return
+        if not self._store.claim_played(token_id, event.item_id):
+            return
+        parsed = parse_item_id(event.item_id)
+        if parsed is not None and self._writer is not None:
+            mark_task = asyncio.create_task(self._mark_native_played(parsed[0]))
+            self._tasks.add(mark_task)
+            mark_task.add_done_callback(self._tasks.discard)
+        task = asyncio.create_task(self._post_played(user_id, event.item_id, token))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _sync_native(self, event: ProgressEvent) -> None:
+        """把位置写进极影视自己的库：节流写，Stopped 必写。"""
+        if self._writer is None or not event.item_id or event.position_ticks is None:
+            return
+        parsed = parse_item_id(event.item_id)
+        if parsed is None:
+            return
+        collection_id, classification_id = parsed
+        seconds = event.position_ticks // 10_000_000
+        stopped = event.path.rstrip("/").lower().endswith("/stopped")
+        now = time.monotonic()
+        if not stopped and now - self._last_native.get(collection_id, 0.0) < self._settings.native_min_interval:
+            return
+        self._last_native[collection_id] = now
+        task = asyncio.create_task(self._write_native(collection_id, classification_id, seconds))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _write_native(self, collection_id: str, classification_id: str, seconds: int) -> None:
+        try:
+            result = await asyncio.to_thread(
+                self._writer.write_position, collection_id, seconds, classification_id
+            )
+        except Exception as exc:  # 原生写入是加分项，任何失败都不能影响播放
+            logger.warning("原生进度写入失败 collection=%s: %s", collection_id, type(exc).__name__)
+            return
+        if result.changed:
+            logger.info("原生进度已写 collection=%s pos=%ss", collection_id, seconds)
+        else:
+            logger.debug("原生进度未写 collection=%s reason=%s", collection_id, result.reason)
+
+    async def _mark_native_played(self, collection_id: str) -> None:
+        try:
+            result = await asyncio.to_thread(self._writer.mark_played, collection_id)
+        except Exception as exc:
+            logger.warning("原生已看写入失败 collection=%s: %s", collection_id, type(exc).__name__)
+            return
+        if result.changed:
+            logger.info("原生已看已写 collection=%s", collection_id)
+        else:
+            logger.debug("原生已看未写 collection=%s reason=%s", collection_id, result.reason)
+
+    async def _post_played(self, user_id: str, item_id: str, token: str) -> None:
+        """后台回写“已看”：写完必须回读确认，200 不等于生效（极影视实测）。"""
+        headers = {"X-Emby-Token": token}
+        candidates = (
+            f"/emby/Users/{user_id}/PlayedItems/{item_id}",
+            f"/Users/{user_id}/PlayedItems/{item_id}",
+        )
+        for path in candidates:
+            try:
+                response = await self._client.post(path, headers=headers, timeout=5.0)
+            except httpx.HTTPError as exc:
+                logger.warning("已看回写请求失败 %s: %s", path, type(exc).__name__)
+                continue
+            confirmed = await self._upstream_played(user_id, item_id, headers)
+            logger.info("已看回写 %s -> %s，上游确认=%s", path, response.status_code, confirmed)
+            if confirmed:
+                return
+        logger.warning("已看回写未生效 item=%s：两种写法都没改变上游状态", item_id)
+
+    async def _upstream_played(self, user_id: str, item_id: str, headers: dict[str, str]) -> bool | None:
+        """回读上游条目的 UserData：确认真写了进去，而不是只看 200。"""
+        try:
+            response = await self._client.get(f"/emby/Users/{user_id}/Items/{item_id}", headers=headers, timeout=5.0)
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("UserData"), dict):
+            return None
+        user_data = payload["UserData"]
+        logger.debug(
+            "上游状态 item=%s played=%s pos=%s last=%s",
+            item_id,
+            user_data.get("Played"),
+            user_data.get("PlaybackPositionTicks"),
+            user_data.get("LastPlayedDate"),
+        )
+        return bool(user_data.get("Played"))

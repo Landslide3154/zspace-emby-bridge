@@ -82,3 +82,31 @@ def test_recent_newest_first(tmp_path: Path) -> None:
     assert entries[0]["item_id"] == "i1"
     assert entries[0]["position_ticks"] == 20000000
     store.close()
+
+
+def test_runtime_roundtrip(tmp_path: Path) -> None:
+    store = ProgressStore(str(tmp_path / "p.db"))
+    store.save_runtimes({"i1": 60000000000})
+    assert store.get_runtime("i1") == 60000000000
+    assert store.get_runtime("missing") is None
+    store.close()
+
+
+def test_claim_played_is_one_shot(tmp_path: Path) -> None:
+    store = ProgressStore(str(tmp_path / "p.db"))
+    token = token_hash("t")
+    store.record(_event(6000000000), token, user_id="u1")
+    assert store.claim_played(token, "i1") is True
+    assert store.claim_played(token, "i1") is False
+    assert store.get(token, "i1").played is True
+    store.close()
+
+
+def test_later_progress_keeps_played_flag(tmp_path: Path) -> None:
+    store = ProgressStore(str(tmp_path / "p.db"))
+    token = token_hash("t")
+    store.record(_event(57000000000), token, user_id="u1")
+    store.claim_played(token, "i1")
+    store.record(_event(58000000000), token, user_id="u1")
+    assert store.get(token, "i1").played is True
+    store.close()

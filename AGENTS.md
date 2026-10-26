@@ -62,6 +62,8 @@ M0 已落地，按此表执行。
 - Hills 把 `X-Emby-Token` 放在 query 里而非 header；脱敏必须覆盖 query 参数名。
 - 极影视对 `Sessions/Playing`、`/Progress`、`/Stopped` 一律返回 400（实测），进度只能落本地库，不要指望转发成功。
 - M0 已实测通过（Hills 每 11 秒发一次 progress，`PositionTicks` 准确）：结论与给 M1 的路径约束见 `docs/protocol-notes.md` §6。
+- 极影视的原生进度在 `zvideo_playlist.play_duration`（秒，唯一键 `user_name+classification_id+collection_id`），已看是 `zvideo_list.state=2`；库文件 `/zspace/zsrp/sqlite/zvideo/zvideo.db` 属 root:root 644，写库必须 sudo。
+- 极影视 Web 的 `/zvideo/*` 接口只认浏览器会话，Python 复刻请求会被 nginx 403；**写库比逆接口稳**，不要在这上面继续绕。
 
 ## 7. 指针
 

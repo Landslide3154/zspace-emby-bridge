@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 import pytest
@@ -180,3 +181,139 @@ def test_token_in_query_variant_supported(client: httpx.Client) -> None:
     )
     body = client.get("/emby/Users/u1/Items/i1", params=query).json()
     assert body["UserData"]["PlaybackPositionTicks"] == 6000000000
+
+
+def test_resume_list_rewritten(client: httpx.Client) -> None:
+    token = "resume-list-token"
+    client.post(
+        "/emby/Sessions/Playing/Progress?UserId=u1",
+        json={"ItemId": "i1", "PositionTicks": 6000000000},
+        headers={"X-Emby-Token": token},
+    )
+    body = client.get("/emby/Users/u1/Items/Resume", headers={"X-Emby-Token": token}).json()
+    assert body["Items"][0]["UserData"]["PlaybackPositionTicks"] == 6000000000
+    assert body["TotalRecordCount"] == 1
+
+
+def test_played_write_back_at_threshold(client: httpx.Client, upstream) -> None:
+    token = "played-token"
+    # 先读一次条目，缓存 RunTimeTicks（6000 秒）
+    client.get("/emby/Users/u1/Items/i1", headers={"X-Emby-Token": token})
+    response = client.post(
+        "/emby/Sessions/Playing/Progress?UserId=u1",
+        json={"ItemId": "i1", "PositionTicks": 57_000_000_000},
+        headers={"X-Emby-Token": token},
+    )
+    assert response.status_code == 400  # 上游拒绝也原样回传
+    assert _wait_for_upstream(upstream, "played-items")
+    body = client.get("/emby/Users/u1/Items/i1", headers={"X-Emby-Token": token}).json()
+    assert body["UserData"]["Played"] is True
+
+
+def test_no_write_back_below_threshold(client: httpx.Client, upstream) -> None:
+    token = "below-token"
+    client.get("/emby/Users/u1/Items/i1", headers={"X-Emby-Token": token})
+    client.post(
+        "/emby/Sessions/Playing/Progress?UserId=u1",
+        json={"ItemId": "i1", "PositionTicks": 30_000_000_000},
+        headers={"X-Emby-Token": token},
+    )
+    time.sleep(0.4)
+    assert not any(call["path"] == "played-items" for call in upstream.seen["calls"])
+
+
+def _wait_for_upstream(upstream, marker: str, timeout: float = 3.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if any(call["path"] == marker for call in upstream.seen["calls"]):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_played_write_back_stops_when_upstream_confirms(client: httpx.Client, upstream) -> None:
+    token = "confirmed-token"
+    client.get("/emby/Users/u1/Items/i1", headers={"X-Emby-Token": token})
+    client.post(
+        "/emby/Sessions/Playing/Progress?UserId=u1",
+        json={"ItemId": "i1", "PositionTicks": 57_000_000_000},
+        headers={"X-Emby-Token": token},
+    )
+    assert _wait_for_upstream(upstream, "played-items")
+    time.sleep(0.3)
+    assert sum(1 for call in upstream.seen["calls"] if call["path"] == "played-items") == 1
+
+
+def test_played_write_back_falls_back_when_upstream_ignores(client: httpx.Client, upstream) -> None:
+    """真实极影视对 POST 返回 200 却不改状态：必须验证，再换不带 /emby 的写法。"""
+    token = "stubborn-token"
+    client.get("/emby/Users/u2/Items/i1", headers={"X-Emby-Token": token})
+    client.post(
+        "/emby/Sessions/Playing/Progress?UserId=u2",
+        json={"ItemId": "i1", "PositionTicks": 57_000_000_000},
+        headers={"X-Emby-Token": token},
+    )
+    assert _wait_for_upstream(upstream, "played-u2-plain", timeout=5.0)
+    markers = [call["path"] for call in upstream.seen["calls"] if call["path"].startswith("played-u2")]
+    assert markers == ["played-u2-prefixed", "played-u2-plain"]
+
+
+NATIVE_ITEM = "collection_560a79a3e816b6e_484e30ab-18be-4c7a-a6dd-e7105cad7e48"
+
+
+def test_native_write_updates_playlist_table(tmp_path, upstream) -> None:
+    """Hills 上报的位置要落到极影视自己的 zvideo_playlist 表。"""
+    import sqlite3
+
+    from app.config import Settings
+    from app.main import create_app
+    from tests.conftest import LiveServer, free_port
+
+    db_path = tmp_path / "zvideo.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "CREATE TABLE zvideo_playlist (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name varchar,"
+        " classification_id varchar, collection_id varchar, video_id varchar, name varchar, path varchar,"
+        " play_duration integer, created_at datetime, updated_at datetime);"
+        "CREATE UNIQUE INDEX user_playlist ON zvideo_playlist (user_name, classification_id, collection_id);"
+    )
+    conn.execute(
+        "INSERT INTO zvideo_playlist (user_name, classification_id, collection_id, play_duration, updated_at)"
+        " VALUES (?,?,?,?,?)",
+        ("17611545258", "484e30ab-18be-4c7a-a6dd-e7105cad7e48", "560a79a3e816b6e", 100, "2026-10-26 12:00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    settings = Settings(
+        upstream_url=upstream.url,
+        listen_port=8022,
+        db_path=":memory:",
+        log_level="INFO",
+        tz="Asia/Shanghai",
+        played_threshold=0.9,
+        native_mode="local",
+        native_db_path=str(db_path),
+        native_user="17611545258",
+        native_min_interval=0.0,
+    )
+    with LiveServer(create_app(settings), free_port()) as server:
+        response = httpx.post(
+            f"{server.url}/emby/Sessions/Playing/Progress?UserId=u1",
+            json={"ItemId": NATIVE_ITEM, "PositionTicks": 18_000_000_000},
+            headers={"X-Emby-Token": "native-token"},
+            timeout=10,
+            trust_env=False,
+        )
+        assert response.status_code == 400  # 上游拒绝，原生写入照旧
+        position = None
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            row = sqlite3.connect(db_path).execute(
+                "SELECT play_duration FROM zvideo_playlist WHERE collection_id = ?", ("560a79a3e816b6e",)
+            ).fetchone()
+            position = row[0] if row else None
+            if position == 1800:
+                break
+            time.sleep(0.05)
+    assert position == 1800

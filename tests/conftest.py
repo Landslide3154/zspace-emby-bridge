@@ -75,7 +75,11 @@ def build_upstream() -> tuple[FastAPI, dict]:
     async def emby_item() -> Response:
         seen["calls"].append({"path": "/emby/Users/u1/Items/i1"})
         return JSONResponse(
-            {"Id": "i1", "RunTimeTicks": 60000000000, "UserData": {"PlaybackPositionTicks": 500000000}}
+            {
+                "Id": "i1",
+                "RunTimeTicks": 60000000000,
+                "UserData": {"PlaybackPositionTicks": 500000000, "Played": bool(seen.get("played"))},
+            }
         )
 
     @app.get("/emby/Users/u1/Items/i2")
@@ -91,6 +95,38 @@ def build_upstream() -> tuple[FastAPI, dict]:
                 },
             }
         )
+
+    @app.get("/emby/Users/u1/Items/Resume")
+    async def resume_list() -> Response:
+        return JSONResponse(
+            {
+                "Items": [{"Id": "i1", "RunTimeTicks": 60000000000, "UserData": {"PlaybackPositionTicks": 500000000}}],
+                "TotalRecordCount": 1,
+            }
+        )
+
+    @app.post("/emby/Users/u1/PlayedItems/i1")
+    async def played_items() -> Response:
+        seen["calls"].append({"path": "played-items"})
+        seen["played"] = True  # 模拟“回写真的生效”
+        return Response(status_code=204)
+
+    # u2：上游对 PlayedItems 一律 200 但不改状态，用来验证会换第二种写法
+    @app.get("/emby/Users/u2/Items/i1")
+    async def stubborn_item() -> Response:
+        return JSONResponse(
+            {"Id": "i1", "RunTimeTicks": 60000000000, "UserData": {"PlaybackPositionTicks": 0, "Played": False}}
+        )
+
+    @app.post("/emby/Users/u2/PlayedItems/i1")
+    async def stubborn_played_prefixed() -> Response:
+        seen["calls"].append({"path": "played-u2-prefixed"})
+        return Response(status_code=200)
+
+    @app.post("/Users/u2/PlayedItems/i1")
+    async def stubborn_played_plain() -> Response:
+        seen["calls"].append({"path": "played-u2-plain"})
+        return Response(status_code=200)
 
     @app.api_route("/Videos/v1/stream", methods=["GET", "HEAD"])
     async def stream(request: Request) -> Response:
@@ -154,6 +190,8 @@ def upstream() -> Iterator[LiveServer]:
 
 @pytest.fixture()
 def proxy(upstream: LiveServer) -> Iterator[LiveServer]:
+    upstream.seen["calls"].clear()  # 上游是 session 级共享，逐测试清账
+    upstream.seen["played"] = False
     settings = Settings(
         upstream_url=upstream.url,
         listen_port=8022,
