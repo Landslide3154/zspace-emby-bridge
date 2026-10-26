@@ -6,7 +6,7 @@
 
 极影视的 Emby 兼容层「读得到、写不回」：进度接口一律 400，写接口 404。本代理挂在中间，把播放位置直接写进极影视自己的数据库，并在读接口上做对齐，于是两边进度一致、断点续播可用；极影视 App 里删除记录也会同步清掉。
 
-English README: [README.en.md](README.en.md)
+[English](README.en.md) · [Docker Hub](https://hub.docker.com/r/snarl6818/zspace-emby-bridge) · [反馈问题](https://github.com/Landslide3154/zspace-emby-bridge/issues)
 
 ## 特性
 
@@ -16,7 +16,7 @@ English README: [README.en.md](README.en.md)
 - **音轨 / 字幕偏好**：把客户端的音轨与字幕选择写回极影视
 - **网页控制台**：首次打开设密码；可改上游地址、阈值、写入间隔、开关、日志级别、IP 白名单，即时生效
 - **看得懂**：同步记录显示片名与文件名，可按片名/文件名/collection_id 搜索
-- **可诊断**：一键测试上游连通性、记录“被极影视覆盖/被清空”事件、显示正在播放的条目
+- **可诊断**：一键测试上游连通性、记录「被极影视覆盖 / 被清空」事件、显示正在播放的条目
 - **视频流零拷贝**：Range / HEAD / 206 原样透传，4K 拖动不额外占内存
 - **脱敏**：日志里不会出现 token、Authorization、api_key
 
@@ -31,39 +31,65 @@ Hills ──▶ 本代理 :8022 ──▶ 极影视 Emby :8021   读接口 / 图
 - 媒体面：视频流不缓冲、不解码，原样流式转发
 - 同步规则：**极影视有记录 → 以它为准**；极影视明确为空且本地记录已过期（默认 15 秒宽限）→ 认为那边删了，本地跟着清
 
-## 快速开始（Docker Compose）
+## 快速开始
 
-前提：极空间上存在 `/zspace/zsrp/sqlite/zvideo/zvideo.db`（装过极影视就有）。
+前提：宿主机上有极影视的库 `/zspace/zsrp/sqlite/zvideo/zvideo.db`（装过极影视就有）。容器以 root 运行才能写它，Docker 默认就是 root。
+
+### 方式一：拉 Docker Hub 镜像（推荐）
 
 ```yaml
 services:
   bridge:
-    image: zspace-emby-bridge:local        # 也可以换成 Docker Hub 镜像
+    image: snarl6818/zspace-emby-bridge:latest
     container_name: zspace-emby-bridge
     restart: unless-stopped
     ports:
       - "${BIND_IP:-0.0.0.0}:${BRIDGE_PORT:-8022}:${LISTEN_PORT:-8022}"
+    env_file:
+      - .env
     environment:
-      UPSTREAM_URL: ${UPSTREAM_URL:-http://192.168.2.8:8021}
       NATIVE_MODE: local
       NATIVE_DB_PATH: /zvideo/zvideo.db
-      NATIVE_USER: "${NATIVE_USER:?需要在 .env 里填极空间账号}"
-      TZ: Asia/Shanghai
-      LOG_LEVEL: INFO
+      DB_PATH: /data/progress.db
     volumes:
-      - ./config:/data                     # 配置与进度库，跟 compose 同目录
+      - ./config:/data                                    # 配置与进度库，跟 compose 同目录
       - ${NATIVE_DB_DIR:-/zspace/zsrp/sqlite/zvideo}:/zvideo
+```
+
+`.env`（照 `.env.example` 抄，最少填这三项）：
+
+```ini
+UPSTREAM_URL=http://192.168.2.8:8021   # 极影视 Emby 接口
+NATIVE_USER=你的极空间账号              # 必填，zvideo 库里的 user_name
+BIND_IP=192.168.2.8                    # 极空间上写本机 LAN IP，避开系统占用的 127.0.0.1
 ```
 
 ```bash
 docker compose up -d
-docker compose logs -f --tail=100
-curl http://192.168.2.8:8022/healthz
+curl http://192.168.2.8:8022/healthz    # 应返回 native_mode=local
 ```
 
-`healthz` 里 `native_mode` 应为 `local`（容器内直接写库）。
+首次打开 `http://192.168.2.8:8022/admin` 设管理密码，再把 Hills 连到这个地址。
 
-### 环境变量
+> 国内直连 Docker Hub 拉不动时，用加速地址把 `image:` 换掉即可：
+> `docker.1ms.run/snarl6818/zspace-emby-bridge:latest`
+
+### 方式二：自己构建
+
+```bash
+docker build -t zspace-emby-bridge:local .
+IMAGE=zspace-emby-bridge:local docker compose up -d
+```
+
+国内网络（换镜像站）：
+
+```bash
+docker build --build-arg BASE=docker.1ms.run/library/python:3.12-slim \
+             --build-arg PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+             -t zspace-emby-bridge:local .
+```
+
+## 环境变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -84,6 +110,7 @@ curl http://192.168.2.8:8022/healthz
 | `SYNC_GRACE_SECONDS` | `15` | 本地记录宽限期 |
 | `SYNC_STREAM_PREFS` | `true` | 是否同步音轨/字幕偏好 |
 | `ADMIN_PASSWORD` | 空 | 预置面板密码；留空则首次打开面板时设置 |
+| `ZSPACE_SSH_HOST` / `_PORT` / `_USER` / `ZSPACE_PASS` | 空 | 仅 `NATIVE_MODE=ssh` 时需要（开发机调试通道） |
 
 ## 网页控制台
 
@@ -93,7 +120,7 @@ curl http://192.168.2.8:8022/healthz
 2. 登录后可改：**上游地址（即时生效）**、原生写入开关、已看阈值、写库间隔、同步宽限、音轨字幕同步、日志级别、IP 白名单；还能改管理密码、导出 `.env` 片段
 3. 概览页能看到：正在播放的条目、最近同步（片名 + 文件名）、写库计数，以及「被极影视覆盖 / 被清空」事件
 4. 「工具」页支持用片名、文件名或 collection_id 查询条目与片头片尾区间
-5. `/metrics` 提供 Prometheus 文本指标
+5. `/metrics` 提供 Prometheus 文本指标；登录失败 5 次/10 分钟会限流
 
 ## Hills 配置
 
@@ -120,7 +147,7 @@ curl http://192.168.2.8:8022/healthz
 | --- | --- |
 | Hills 连不上 | `/healthz`、端口 8022 是否映射、防火墙 |
 | 进度不同步到极影视 | 日志有没有 `原生进度已写`；面板里「原生进度写入」是否开着 |
-| 日志 `原生进度未写 … reason=unresolved_id` | 该条目的 id 形态没认出来，把日志里的 item 发我 |
+| 日志 `原生进度未写 … reason=unresolved_id` | 该条目的 id 形态没认出来，把日志里的 item 发到 issues |
 | 日志 `原生进度未写 … reason=not_in_playlist` | 极影视里没有这条记录（也没能建档） |
 | `原生进度写入失败` | 库路径/权限：容器是否 root、卷映射是否正确 |
 | 极影视 App 不同步 | App 有缓存，彻底杀掉进程再打开 |
@@ -158,4 +185,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8022
 | `app/redact.py` | 日志脱敏 |
 | `docs/protocol-notes.md` | 协议探测与实测记录 |
 
-版本号唯一来源：`pyproject.toml`。
+版本号唯一来源：`pyproject.toml`。镜像由 GitHub Actions 在推 `v*` 标签时构建并推送到 Docker Hub（`linux/amd64` + `linux/arm64`）。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。
+

@@ -1,7 +1,9 @@
 services:
   bridge:
     build: .
-    image: ${IMAGE:-zspace-emby-bridge:local}
+    # 默认用 Docker Hub 上的镜像；自己构建时：
+    #   IMAGE=zspace-emby-bridge:local docker compose up -d --build
+    image: ${IMAGE:-snarl6818/zspace-emby-bridge:latest}
     container_name: zspace-emby-bridge
     restart: unless-stopped
     ports:
