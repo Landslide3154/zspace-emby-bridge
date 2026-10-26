@@ -68,7 +68,7 @@ M0 已落地，按此表执行。
 - M0 已实测通过（Hills 每 11 秒发一次 progress，`PositionTicks` 准确）：结论与给 M1 的路径约束见 `docs/protocol-notes.md` §6。
 - 极影视的原生进度在 `zvideo_playlist.play_duration`（秒，唯一键 `user_name+classification_id+collection_id`），已看是 `zvideo_list.state=2`；库文件 `/zspace/zsrp/sqlite/zvideo/zvideo.db` 属 root:root 644，写库必须 sudo。
 - 极影视 Web 的 `/zvideo/*` 接口只认浏览器会话，Python 复刻请求会被 nginx 403；**写库比逆接口稳**，不要在这上面继续绕。
-- 条目 id 有两种：`collection_<collection_id>_<classification_id>`（影片/合集）与 `video_<video_id>_<collection_id>_<classification_id>`（剧集、抖音、MV、锻炼等单文件）；解析不了时用 `zvideo_list` 反查兜底。自建分类不产生新前缀。
+- 条目 id 有两种：`collection_<collection_id>_<classification_id>`（影片/合集）与 `video_<video_id>_<collection_id>_<classification_id>`（单文件条目）；解析不了时用 `zvideo_list` 反查兜底。自建分类不产生新前缀。
 - 控制台 `/admin`：首次访问设管理密码（PBKDF2 存库），设置写 `app_settings` 表并覆盖 env（阈值、写库间隔、宽限期、开关、日志级别），保存即生效。
 
 ## 7. 指针

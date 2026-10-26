@@ -10,7 +10,7 @@
 
 ## Features
 
-- **Progress sync both ways**: movies, TV, anime, documentaries, plus custom categories (抖音 / MV / 锻炼 / 和谐)
+- **Progress sync both ways**: movies, TV, anime, documentaries, plus custom categories
 - **极影视 is authoritative**: its record wins; if it is cleared, the local copy is cleared too
 - **Played sync**: marks watched past a threshold; per-episode for series, never whole-season by accident
 - **Audio / subtitle preference**: writes the client's selection back to 极影视

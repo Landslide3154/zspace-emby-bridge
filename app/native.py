@@ -1,7 +1,7 @@
 """极影视原生进度：直接更新 zvideo_playlist / zvideo_list。
 
 - collection_<collection_id>_<classification>：整部影片 / 合集
-- video_<video_id>_<collection_id>_<classification>：合集里的单个文件（剧集、抖音、MV、锻炼…）
+- video_<video_id>_<collection_id>_<classification>：合集里的单个文件（剧集、单文件条目…）
 
 生产用 local 模式（容器挂载库文件）；ssh 模式仅供开发机调试，只支持上面两种 id。
 """
