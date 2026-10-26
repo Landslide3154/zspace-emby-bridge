@@ -26,9 +26,18 @@ def load_env(path: str = ".env") -> dict[str, str]:
 def main() -> None:
     args = sys.argv[1:]
     use_sudo = "--sudo" in args
+    timeout = 60
+    if "--timeout" in args:
+        index = args.index("--timeout")
+        try:
+            timeout = int(args[index + 1])
+        except (IndexError, ValueError):
+            print("--timeout 需要一个秒数")
+            raise SystemExit(2)
+        args = args[:index] + args[index + 2 :]
     command = " ".join(a for a in args if a != "--sudo").strip()
     if not command:
-        print('用法：python scripts/ssh_run.py [--sudo] "<命令>"')
+        print('用法：python scripts/ssh_run.py [--sudo] [--timeout 秒] "<命令>"')
         raise SystemExit(2)
 
     env = load_env()
@@ -44,7 +53,7 @@ def main() -> None:
         look_for_keys=False,
     )
     remote = f"sudo -S -p '' bash -lc {shell_quote(command)}" if use_sudo else command
-    stdin, stdout, stderr = client.exec_command(remote, timeout=60, get_pty=False)
+    stdin, stdout, stderr = client.exec_command(remote, timeout=timeout, get_pty=False)
     if use_sudo:
         stdin.write(env["ZSPACE_PASS"] + "\n")
         stdin.flush()
