@@ -165,6 +165,12 @@ class ProgressStore:
             rows = self._conn.execute("SELECT key, value FROM app_settings").fetchall()
         return {row["key"]: row["value"] for row in rows}
 
+    def delete_settings(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        with self._lock:
+            self._conn.executemany("DELETE FROM app_settings WHERE key = ?", [(key,) for key in keys])
+
     def put_settings(self, values: dict[str, str]) -> None:
         if not values:
             return

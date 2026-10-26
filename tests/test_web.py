@@ -90,6 +90,26 @@ def test_metrics_exposes_counters(tmp_path) -> None:
         assert "bridge_progress_records" in text
 
 
+def test_icon_and_reset(tmp_path) -> None:
+    _, server, client = make_client(tmp_path)
+    with server, client:
+        icon = client.get("/icon.png")
+        assert icon.status_code == 200
+        assert icon.headers["content-type"] == "image/png"
+        assert client.get("/favicon.ico").status_code == 200
+
+        client.post("/admin/api/setup", json={"password": "secret123"}, headers={"X-Requested-With": "fetch"})
+        client.post(
+            "/admin/api/settings",
+            json={"played_threshold": 0.55},
+            headers={"X-Requested-With": "fetch"},
+        )
+        assert client.get("/admin/api/settings").json()["played_threshold"] == pytest.approx(0.55)
+        reset = client.post("/admin/api/settings/reset", headers={"X-Requested-With": "fetch"})
+        assert reset.status_code == 200
+        assert client.get("/admin/api/settings").json()["played_threshold"] == pytest.approx(0.9)
+
+
 def test_settings_survive_restart(tmp_path) -> None:
     settings, server, client = make_client(tmp_path)
     with server, client:

@@ -190,7 +190,8 @@ class UpstreamProxy:
         self._settings = settings
         self._store = store
         self._runtime = runtime
-        self.stats: dict[str, int] = {"progress": 0, "native_written": 0, "native_failed": 0, "played": 0}
+        self.stats: dict[str, float] = {"progress": 0, "native_written": 0, "native_failed": 0, "played": 0,
+                                       "last_progress_at": 0.0, "last_native_at": 0.0}
         self._tasks: set[asyncio.Task] = set()
         self._writer = build_writer(
             settings.native_mode,
@@ -321,6 +322,7 @@ class UpstreamProxy:
     def _record(self, event: ProgressEvent, token_id: str, user_id: str | None) -> None:
         """落库 + 留一条脱敏日志；没有 token 时不落库，避免多用户串号。"""
         self.stats["progress"] += 1
+        self.stats["last_progress_at"] = time.time()
         if token_id:
             self._store.record(event, token_id, user_id)
         logger.info(
@@ -396,6 +398,7 @@ class UpstreamProxy:
             return
         if result.changed:
             self.stats["native_written"] += 1
+            self.stats["last_native_at"] = time.time()
             logger.info(
                 "原生进度已写 collection=%s video=%s pos=%ss", item.collection_id, item.video_id or "-", seconds
             )

@@ -1,5 +1,7 @@
 # zspace-emby-bridge
 
+<img src="app/assets/icon-256.png" width="88" height="88" alt="zspace-emby-bridge icon">
+
 **Two-way playback progress sync between Hills (any Emby client) and ZSpace's 极影视.**
 
 极影视's Emby-compatible layer can read progress but never persists it: `Sessions/Playing*` always returns 400, `UserData` write endpoints are 404. This proxy sits in between, writes the position straight into 极影视's own SQLite database, and aligns read responses — so both sides agree, resume works, and deletions in 极影视 propagate.

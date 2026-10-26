@@ -48,13 +48,15 @@ def main() -> None:
         look_for_keys=False,
     )
     sftp = client.open_sftp()
-    for folder in (REMOTE_DIR, f"{REMOTE_DIR}/app"):
+    for folder in (REMOTE_DIR, f"{REMOTE_DIR}/app", f"{REMOTE_DIR}/app/assets"):
         try:
             sftp.stat(folder)
         except OSError:
             sftp.mkdir(folder)
     for name in ("Dockerfile", "pyproject.toml"):
         sftp.put(name, f"{REMOTE_DIR}/{name}")
+    for path in sorted(pathlib.Path("app/assets").glob("*.png")):
+        sftp.put(str(path), f"{REMOTE_DIR}/app/assets/{path.name}")
     for path in sorted(pathlib.Path("app").glob("*.py")):
         sftp.put(str(path), f"{REMOTE_DIR}/app/{path.name}")
     with sftp.file(f"{REMOTE_DIR}/.env", "w") as handle:

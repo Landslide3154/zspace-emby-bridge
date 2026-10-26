@@ -26,7 +26,7 @@ class RuntimeConfig:
 
     def __init__(self, store: ProgressStore, settings: Settings) -> None:
         self._store = store
-        self._options = Options(
+        self._defaults = Options(
             native_enabled=settings.native_mode != "off",
             played_threshold=settings.played_threshold,
             native_min_interval=settings.native_min_interval,
@@ -34,6 +34,7 @@ class RuntimeConfig:
             sync_stream_prefs=settings.sync_stream_prefs,
             log_level=settings.log_level,
         )
+        self._options = self._defaults
         self.reload()
 
     @property
@@ -63,6 +64,15 @@ class RuntimeConfig:
             options = replace(options, log_level=stored["log_level"].upper())
         self._options = options
         logging.getLogger("bridge").setLevel(options.log_level)
+
+    def reset(self) -> Options:
+        """清掉面板里的覆盖值，回到环境变量默认。"""
+        keys = ["native_enabled", "played_threshold", "native_min_interval",
+                "sync_grace_seconds", "sync_stream_prefs", "log_level"]
+        self._store.delete_settings(keys)
+        self._options = self._defaults
+        logging.getLogger("bridge").setLevel(self._options.log_level)
+        return self._options
 
     def update(self, **changes: object) -> Options:
         options = self._options

@@ -8,13 +8,16 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from pathlib import Path
+
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
 from .config import Settings
 from .runtime import RuntimeConfig
 from .store import ProgressStore
 from .web_ui import ADMIN_HTML
 
+ASSETS = Path(__file__).parent / "assets"
 COOKIE_NAME = "bridge_admin"
 SESSION_TTL = 7 * 24 * 3600
 PASSWORD_KEY = "admin_password"
@@ -112,6 +115,18 @@ def build_admin_router(
     async def admin_page() -> HTMLResponse:
         return HTMLResponse(ADMIN_HTML)
 
+    @router.get("/icon.png")
+    async def icon_png() -> FileResponse:
+        return FileResponse(ASSETS / "icon-256.png", media_type="image/png")
+
+    @router.get("/icon-192.png")
+    async def icon_192() -> FileResponse:
+        return FileResponse(ASSETS / "icon-192.png", media_type="image/png")
+
+    @router.get("/favicon.ico")
+    async def favicon() -> FileResponse:
+        return FileResponse(ASSETS / "icon-64.png", media_type="image/png")
+
     @router.get("/admin/api/session")
     async def session(request: Request) -> dict:
         return {
@@ -190,6 +205,14 @@ def build_admin_router(
             options = runtime.update(**body)
         except (TypeError, ValueError) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
+        return {"ok": True, "options": options.__dict__}
+
+    @router.post("/admin/api/settings/reset")
+    async def reset_settings(request: Request) -> Any:
+        denied = guard(request)
+        if denied is not None:
+            return denied
+        options = runtime.reset()
         return {"ok": True, "options": options.__dict__}
 
     @router.get("/admin/api/skips/{collection_id}")
