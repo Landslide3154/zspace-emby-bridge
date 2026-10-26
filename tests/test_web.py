@@ -96,7 +96,15 @@ def test_icon_and_reset(tmp_path) -> None:
         icon = client.get("/icon.png")
         assert icon.status_code == 200
         assert icon.headers["content-type"] == "image/png"
+        assert "no-cache" in icon.headers["cache-control"]
         assert client.get("/favicon.ico").status_code == 200
+
+        # 换图标后必须能立刻拿到新图：HEAD 可用，且页面里的 URL 带内容哈希
+        assert client.head("/icon.png").status_code == 200
+        page = client.get("/admin").text
+        assert "?v=" in page
+        assert "no-cache" in client.get("/admin").headers["cache-control"]
+        assert "__ICON_V__" not in page
 
         client.post("/admin/api/setup", json={"password": "secret123"}, headers={"X-Requested-With": "fetch"})
         client.post(

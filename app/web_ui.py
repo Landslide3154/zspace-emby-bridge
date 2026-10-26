@@ -6,7 +6,7 @@ ADMIN_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>极影视进度桥</title>
-<link rel="icon" href="/favicon.ico">
+<link rel="icon" href="/favicon.ico?v=__ICON_V__">
 <style>
 :root{
   --ink:#0B0E14; --surface:#121722; --surface-2:#161C29; --line:#1E2635; --line-soft:#171E2B;
@@ -140,7 +140,7 @@ pre.out{margin:14px 0 0;padding:14px;border:1px solid var(--line);border-radius:
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><img src="/icon.png" alt=""><b>极影视进度桥</b><span id="brandVersion"></span></div>
+  <div class="brand"><img src="/icon.png?v=__ICON_V__" alt=""><b>极影视进度桥</b><span id="brandVersion"></span></div>
   <div class="spacer"></div>
   <span class="pill" id="pill"><span class="dot"></span><span id="pillText">连接中</span></span>
   <button class="ghost hide" id="logoutBtn">退出登录</button>
@@ -148,7 +148,7 @@ pre.out{margin:14px 0 0;padding:14px;border:1px solid var(--line);border-radius:
 
 <div class="auth hide" id="authView">
   <div class="card">
-    <img src="/icon.png" alt="">
+    <img src="/icon.png?v=__ICON_V__" alt="">
     <h1 id="authTitle">登录</h1>
     <p id="authHint"></p>
     <input type="password" id="pwd" placeholder="管理密码" autocomplete="current-password">

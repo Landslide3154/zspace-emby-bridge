@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter
 
 S = 1024
+SHRINK = 0.75                # 剪影相对底板边长；越小留白越多
 PLATE = (61, 90, 254)        # #3D5AFE
 SHADOW = (10, 16, 48)
 OUT = Path("app/assets")
@@ -111,12 +112,16 @@ def glyph_mask(size: int, variant: str = "bridge", ss: int = 4) -> Image.Image:
     return layer.resize((size, size), Image.LANCZOS)
 
 
-def compose(size: int, variant: str = "bridge", plate_color: tuple[int, int, int] = PLATE) -> Image.Image:
+def compose(
+    size: int,
+    variant: str = "bridge",
+    plate_color: tuple[int, int, int] = PLATE,
+    shrink: float = SHRINK,
+) -> Image.Image:
     ss = 4
     plate = plate_mask(size, ss)
     glyph = glyph_mask(size, variant, ss)
-    # 剪影占底板比例：0.72 → 0.60，整体缩小、重心略上移
-    shrink = 0.88
+    # 剪影占底板比例由 shrink 控制（0.88 → 白色外框约占 56% 边长）
     small = max(1, int(size * shrink))
     glyph = glyph.resize((small, small), Image.LANCZOS)
     canvas_glyph = Image.new("L", (size, size), 0)
@@ -128,7 +133,7 @@ def compose(size: int, variant: str = "bridge", plate_color: tuple[int, int, int
     canvas.paste(base, (0, 0), plate)
 
     # 剪影投影：偏移 (0.006,0.024)×剪影边长，模糊 0.055×边长，alpha 0.50
-    edge = size * 0.72
+    edge = size * 0.64 * shrink
     shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     shadow.paste(SHADOW + (128,), (0, 0), glyph)
     shadow = shadow.filter(ImageFilter.GaussianBlur(edge * 0.055))

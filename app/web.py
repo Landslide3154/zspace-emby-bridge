@@ -17,6 +17,10 @@ from .store import ProgressStore
 from .web_ui import ADMIN_HTML
 
 ASSETS = Path(__file__).parent / "assets"
+# 图标 URL 带内容哈希：换图标后浏览器不会再拿旧缓存
+ICON_V = hashlib.sha256((ASSETS / "icon-256.png").read_bytes()).hexdigest()[:10]
+ADMIN_PAGE = ADMIN_HTML.replace("__ICON_V__", ICON_V)
+NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
 COOKIE_NAME = "bridge_admin"
 SESSION_TTL = 7 * 24 * 3600
 PASSWORD_KEY = "admin_password"
@@ -147,21 +151,21 @@ def build_admin_router(
             record["file"] = info.get("file")
         return records
 
-    @router.get("/icon.png")
+    @router.api_route("/icon.png", methods=["GET", "HEAD"])
     async def icon_png() -> FileResponse:
-        return FileResponse(ASSETS / "icon-256.png", media_type="image/png")
+        return FileResponse(ASSETS / "icon-256.png", media_type="image/png", headers=NO_CACHE)
 
-    @router.get("/icon-192.png")
+    @router.api_route("/icon-192.png", methods=["GET", "HEAD"])
     async def icon_192() -> FileResponse:
-        return FileResponse(ASSETS / "icon-192.png", media_type="image/png")
+        return FileResponse(ASSETS / "icon-192.png", media_type="image/png", headers=NO_CACHE)
 
-    @router.get("/favicon.ico")
+    @router.api_route("/favicon.ico", methods=["GET", "HEAD"])
     async def favicon() -> FileResponse:
-        return FileResponse(ASSETS / "icon-64.png", media_type="image/png")
+        return FileResponse(ASSETS / "icon-64.png", media_type="image/png", headers=NO_CACHE)
 
     @router.get("/admin", response_class=HTMLResponse)
     async def admin_page() -> HTMLResponse:
-        return HTMLResponse(ADMIN_HTML)
+        return HTMLResponse(ADMIN_PAGE, headers=NO_CACHE)
 
     @router.get("/admin/api/session")
     async def session(request: Request) -> dict:
