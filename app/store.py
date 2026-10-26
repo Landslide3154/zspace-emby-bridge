@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS item_runtime (
     runtime_ticks INTEGER NOT NULL,
     updated_at    REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -135,6 +139,13 @@ class ProgressStore:
             ).fetchone()
         return int(row["runtime_ticks"]) if row is not None else None
 
+    def delete(self, token_id: str, item_id: str) -> None:
+        """极影视那边删了记录时，本地也跟着清，避免把旧进度又塞回客户端。"""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM progress WHERE token_hash = ? AND item_id = ?", (token_id, item_id)
+            )
+
     def claim_played(self, token_id: str, item_id: str) -> bool:
         """把“已看回写”做成一次性：只有第一次返回 True。"""
         with self._lock:
@@ -147,6 +158,22 @@ class ProgressStore:
                 "UPDATE progress SET played = 1 WHERE token_hash = ? AND item_id = ?", (token_id, item_id)
             )
             return True
+
+    # ---- 面板设置 ----
+    def get_settings(self) -> dict[str, str]:
+        with self._lock:
+            rows = self._conn.execute("SELECT key, value FROM app_settings").fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+    def put_settings(self, values: dict[str, str]) -> None:
+        if not values:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                list(values.items()),
+            )
 
     def recent(self, limit: int = 20) -> list[dict]:
         if limit <= 0:

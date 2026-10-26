@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
@@ -64,16 +65,38 @@ def is_rewritable_path(path: str) -> bool:
     return _LIST_PATH.match(path) is not None
 
 
-def merge_user_data(item: dict[str, Any], local: LocalProgress | None) -> dict[str, Any]:
-    """本地更新更晚才覆盖；否则保留极影视返回的值。不修改入参。"""
+def _upstream_has_record(user_data: dict[str, Any]) -> bool:
+    """极影视这条到底有没有记录：已看、位置>0、或播放时间存在。"""
+    if user_data.get("Played") is True:
+        return True
+    position = user_data.get("PlaybackPositionTicks")
+    if isinstance(position, (int, float)) and not isinstance(position, bool) and position > 0:
+        return True
+    return bool(user_data.get("LastPlayedDate"))
+
+
+def merge_user_data(
+    item: dict[str, Any],
+    local: LocalProgress | None,
+    *,
+    now: float | None = None,
+    grace: float = 15.0,
+) -> tuple[dict[str, Any], bool]:
+    """以极影视为准：上游没记录且本地记录也旧了，就认为上游被清空。
+
+    返回（合并后的条目, 是否需要清掉本地记录）。
+    """
     if local is None:
-        return item
+        return item, False
     user_data = item.get("UserData")
     if not isinstance(user_data, dict):
         user_data = {}
-    upstream_updated = parse_iso8601(user_data.get("LastPlayedDate"))
-    if upstream_updated is not None and upstream_updated > local.updated_at:
-        return item
+    if _upstream_has_record(user_data):
+        return item, False
+    current = time.time() if now is None else now
+    if current - local.updated_at > grace:
+        # 上游明确没有这条记录，本地又早已写入 → 用户在极影视里清掉了，跟着清
+        return item, True
 
     merged_data = dict(user_data)
     merged_data["PlaybackPositionTicks"] = local.position_ticks
@@ -82,15 +105,21 @@ def merge_user_data(item: dict[str, Any], local: LocalProgress | None) -> dict[s
         merged_data["PlayedPercentage"] = percentage
     if local.played:
         merged_data["Played"] = True
-
     merged_item = dict(item)
     merged_item["UserData"] = merged_data
-    return merged_item
+    return merged_item, False
 
 
-def rewrite_payload(payload: Any, resolver: Callable[[str], LocalProgress | None]) -> Any:
+def rewrite_payload(
+    payload: Any,
+    resolver: Callable[[str], LocalProgress | None],
+    *,
+    now: float | None = None,
+    grace: float = 15.0,
+    on_clear: Callable[[str], None] | None = None,
+) -> Any:
     """递归重写所有带 Id + UserData 的条目；其余字段原样保留。"""
-    return _walk(payload, resolver)
+    return _walk(payload, resolver, time.time() if now is None else now, grace, on_clear)
 
 
 def collect_runtimes(payload: Any) -> dict[str, int]:
@@ -113,14 +142,23 @@ def _collect_runtimes(node: Any, found: dict[str, int]) -> None:
             _collect_runtimes(entry, found)
 
 
-def _walk(node: Any, resolver: Callable[[str], LocalProgress | None]) -> Any:
+def _walk(
+    node: Any,
+    resolver: Callable[[str], LocalProgress | None],
+    now: float,
+    grace: float,
+    on_clear: Callable[[str], None] | None,
+) -> Any:
     if isinstance(node, dict):
         item_id = node.get("Id")
         if isinstance(item_id, str) and isinstance(node.get("UserData"), dict):
-            node = merge_user_data(node, resolver(item_id))
-        return {key: _walk(value, resolver) for key, value in node.items()}
+            merged, cleared = merge_user_data(node, resolver(item_id), now=now, grace=grace)
+            if cleared and on_clear is not None:
+                on_clear(item_id)
+            node = merged
+        return {key: _walk(value, resolver, now, grace, on_clear) for key, value in node.items()}
     if isinstance(node, list):
-        return [_walk(entry, resolver) for entry in node]
+        return [_walk(entry, resolver, now, grace, on_clear) for entry in node]
     return node
 
 

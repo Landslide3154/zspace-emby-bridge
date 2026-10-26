@@ -168,7 +168,7 @@ def test_progress_isolated_per_token(client: httpx.Client) -> None:
         headers={"X-Emby-Token": "user-a"},
     )
     body = client.get("/emby/Users/u1/Items/i1", headers={"X-Emby-Token": "user-b"}).json()
-    assert body["UserData"]["PlaybackPositionTicks"] == 500000000
+    assert body["UserData"]["PlaybackPositionTicks"] == 0  # 另一个 token 看不到 user-a 的进度
 
 
 def test_token_in_query_variant_supported(client: httpx.Client) -> None:
@@ -274,8 +274,11 @@ def test_native_write_updates_playlist_table(tmp_path, upstream) -> None:
     conn.executescript(
         "CREATE TABLE zvideo_playlist (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name varchar,"
         " classification_id varchar, collection_id varchar, video_id varchar, name varchar, path varchar,"
-        " play_duration integer, created_at datetime, updated_at datetime);"
+        " play_duration integer, created_at datetime, updated_at datetime, video_duration integer,"
+        " audio_index text, subtitle_index text);"
         "CREATE UNIQUE INDEX user_playlist ON zvideo_playlist (user_name, classification_id, collection_id);"
+        "CREATE TABLE zvideo_list (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name varchar, video_id varchar,"
+        " collection_id varchar, name varchar, path varchar, duration integer, state tinyint default 1);"
     )
     conn.execute(
         "INSERT INTO zvideo_playlist (user_name, classification_id, collection_id, play_duration, updated_at)"

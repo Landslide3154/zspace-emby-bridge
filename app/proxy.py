@@ -83,6 +83,8 @@ class ProgressEvent:
     body_format: str
     body_summary: str
     received_at: float
+    audio_index: int | None = None
+    subtitle_index: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +96,8 @@ class ProgressEvent:
             "play_session_id": self.play_session_id,
             "body_format": self.body_format,
             "body_summary": self.body_summary,
+            "audio_index": self.audio_index,
+            "subtitle_index": self.subtitle_index,
             "received_at": datetime.fromtimestamp(self.received_at, UTC).isoformat(),
         }
 
@@ -145,6 +149,8 @@ def parse_progress_event(method: str, path: str, query: str, body: bytes) -> Pro
     ticks = _as_int(data.get("PositionTicks"))
     item_id = data.get("ItemId") or data.get("itemId")
     play_session_id = data.get("PlaySessionId") or data.get("playSessionId")
+    audio_index = _as_int(data.get("AudioStreamIndex"))
+    subtitle_index = _as_int(data.get("SubtitleStreamIndex"))
     body_summary = _summarize(data)
     return ProgressEvent(
         method=method.upper(),
@@ -156,6 +162,8 @@ def parse_progress_event(method: str, path: str, query: str, body: bytes) -> Pro
         body_format=body_format,
         body_summary=body_summary,
         received_at=time.time(),
+        audio_index=audio_index,
+        subtitle_index=subtitle_index,
     )
 
 
@@ -178,9 +186,11 @@ RESPONSE_DROP = HOP_BY_HOP - {"content-length"} | {"date", "server"}
 class UpstreamProxy:
     """把请求转给极影视：进度落本地库，读条目时把本地进度写回响应。"""
 
-    def __init__(self, settings: Settings, store: ProgressStore) -> None:
+    def __init__(self, settings: Settings, store: ProgressStore, runtime: RuntimeConfig | None = None) -> None:
         self._settings = settings
         self._store = store
+        self._runtime = runtime
+        self.stats: dict[str, int] = {"progress": 0, "native_written": 0, "native_failed": 0, "played": 0}
         self._tasks: set[asyncio.Task] = set()
         self._writer = build_writer(
             settings.native_mode,
@@ -204,6 +214,18 @@ class UpstreamProxy:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    @property
+    def writer(self):
+        return self._writer
+
+    @property
+    def _options(self):
+        return self._runtime.options if self._runtime is not None else None
+
+    def _option(self, name: str, default):
+        options = self._options
+        return getattr(options, name, default) if options is not None else default
 
     async def handle(self, request: Request) -> Response:
         started = time.perf_counter()
@@ -275,7 +297,12 @@ class UpstreamProxy:
             payload = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return Response(content=raw, status_code=upstream.status_code, headers=headers)
-        rewritten = rewrite_payload(payload, lambda item_id: self._local_progress(token_id, item_id))
+        rewritten = rewrite_payload(
+            payload,
+            lambda item_id: self._local_progress(token_id, item_id),
+            grace=self._option('sync_grace_seconds', 15.0),
+            on_clear=lambda item_id: self._store.delete(token_id, item_id),
+        )
         runtimes = collect_runtimes(rewritten)
         if runtimes:
             self._store.save_runtimes(runtimes)
@@ -293,6 +320,7 @@ class UpstreamProxy:
 
     def _record(self, event: ProgressEvent, token_id: str, user_id: str | None) -> None:
         """落库 + 留一条脱敏日志；没有 token 时不落库，避免多用户串号。"""
+        self.stats["progress"] += 1
         if token_id:
             self._store.record(event, token_id, user_id)
         logger.info(
@@ -316,13 +344,14 @@ class UpstreamProxy:
         runtime = self._store.get_runtime(event.item_id)
         if runtime is None or runtime <= 0:
             return
-        if event.position_ticks / runtime < self._settings.played_threshold:
+        if event.position_ticks / runtime < self._option('played_threshold', 0.9):
             return
         if not self._store.claim_played(token_id, event.item_id):
             return
+        self.stats["played"] += 1
         parsed = parse_item_id(event.item_id)
         if parsed is not None and self._writer is not None:
-            mark_task = asyncio.create_task(self._mark_native_played(parsed[0]))
+            mark_task = asyncio.create_task(self._mark_native_played(event.item_id))
             self._tasks.add(mark_task)
             mark_task.add_done_callback(self._tasks.discard)
         task = asyncio.create_task(self._post_played(user_id, event.item_id, token))
@@ -333,43 +362,60 @@ class UpstreamProxy:
         """把位置写进极影视自己的库：节流写，Stopped 必写。"""
         if self._writer is None or not event.item_id or event.position_ticks is None:
             return
-        parsed = parse_item_id(event.item_id)
-        if parsed is None:
+        if not self._option("native_enabled", True):
             return
-        collection_id, classification_id = parsed
         seconds = event.position_ticks // 10_000_000
         stopped = event.path.rstrip("/").lower().endswith("/stopped")
         now = time.monotonic()
-        if not stopped and now - self._last_native.get(collection_id, 0.0) < self._settings.native_min_interval:
+        if not stopped and now - self._last_native.get(event.item_id, 0.0) < self._option('native_min_interval', 10.0):
             return
-        self._last_native[collection_id] = now
-        task = asyncio.create_task(self._write_native(collection_id, classification_id, seconds))
+        self._last_native[event.item_id] = now
+        task = asyncio.create_task(self._write_native(event, seconds))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _write_native(self, collection_id: str, classification_id: str, seconds: int) -> None:
+    async def _write_native(self, event: ProgressEvent, seconds: int) -> None:
+        item = await asyncio.to_thread(self._writer.resolve, event.item_id or "")
+        if item is None:
+            logger.debug("原生进度未写 item=%s reason=unresolved_id", event.item_id)
+            return
+        prefs = self._option('sync_stream_prefs', True)
+        audio_index = event.audio_index if prefs else None
+        subtitle_index = event.subtitle_index if prefs else None
         try:
             result = await asyncio.to_thread(
-                self._writer.write_position, collection_id, seconds, classification_id
+                self._writer.write_position,
+                item,
+                seconds,
+                audio_index=audio_index,
+                subtitle_index=subtitle_index,
             )
-        except Exception as exc:  # 原生写入是加分项，任何失败都不能影响播放
-            logger.warning("原生进度写入失败 collection=%s: %s", collection_id, type(exc).__name__)
+        except Exception as exc:  # 原生写入失败不能影响播放
+            self.stats["native_failed"] += 1
+            logger.warning("原生进度写入失败 collection=%s: %s", item.collection_id, type(exc).__name__)
             return
         if result.changed:
-            logger.info("原生进度已写 collection=%s pos=%ss", collection_id, seconds)
+            self.stats["native_written"] += 1
+            logger.info(
+                "原生进度已写 collection=%s video=%s pos=%ss", item.collection_id, item.video_id or "-", seconds
+            )
         else:
-            logger.debug("原生进度未写 collection=%s reason=%s", collection_id, result.reason)
+            logger.debug("原生进度未写 collection=%s reason=%s", item.collection_id, result.reason)
 
-    async def _mark_native_played(self, collection_id: str) -> None:
+    async def _mark_native_played(self, item_id: str) -> None:
+        item = await asyncio.to_thread(self._writer.resolve, item_id)
+        if item is None:
+            logger.debug("原生已看未写 item=%s reason=unresolved_id", item_id)
+            return
         try:
-            result = await asyncio.to_thread(self._writer.mark_played, collection_id)
+            result = await asyncio.to_thread(self._writer.mark_played, item)
         except Exception as exc:
-            logger.warning("原生已看写入失败 collection=%s: %s", collection_id, type(exc).__name__)
+            logger.warning("原生已看写入失败 collection=%s: %s", item.collection_id, type(exc).__name__)
             return
         if result.changed:
-            logger.info("原生已看已写 collection=%s", collection_id)
+            logger.info("原生已看已写 collection=%s video=%s", item.collection_id, item.video_id or "-")
         else:
-            logger.debug("原生已看未写 collection=%s reason=%s", collection_id, result.reason)
+            logger.debug("原生已看未写 collection=%s reason=%s", item.collection_id, result.reason)
 
     async def _post_played(self, user_id: str, item_id: str, token: str) -> None:
         """后台回写“已看”：写完必须回读确认，200 不等于生效（极影视实测）。"""

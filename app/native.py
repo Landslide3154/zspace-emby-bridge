@@ -1,8 +1,9 @@
-"""极影视原生进度：直接更新 zvideo_playlist.play_duration 与 zvideo_list.state。
+"""极影视原生进度：直接更新 zvideo_playlist / zvideo_list。
 
-两种通道：
-- local：容器里挂载了数据库文件，直接用 sqlite3 写；
-- ssh：开发机通过 SSH + sudo 远程执行 sqlite3（数据文件属于 root）。
+- collection_<collection_id>_<classification>：整部影片 / 合集
+- video_<video_id>_<collection_id>_<classification>：合集里的单个文件（剧集、抖音、MV、锻炼…）
+
+生产用 local 模式（容器挂载库文件）；ssh 模式仅供开发机调试，只支持上面两种 id。
 """
 from __future__ import annotations
 
@@ -14,10 +15,17 @@ from datetime import datetime
 from typing import Protocol
 
 _ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
-# Emby 侧 item id 形如 collection_<collection_id>_<classification_id>
-_EMBY_ITEM = re.compile(r"^collection_([0-9a-z]+)_([0-9a-f-]{32,})$", re.IGNORECASE)
+_COLLECTION_ITEM = re.compile(r"^collection_([0-9a-z]+)_([0-9a-f-]{32,})$", re.IGNORECASE)
+_VIDEO_ITEM = re.compile(r"^video_([0-9a-z]+)_([0-9a-z]+)_([0-9a-f-]{32,})$", re.IGNORECASE)
 
 PLAYED_STATE = 2  # zvideo_list.state：2 = 已看
+
+
+@dataclass(frozen=True)
+class ParsedItem:
+    collection_id: str
+    classification_id: str
+    video_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -27,21 +35,33 @@ class WriteResult:
 
 
 class PlaylistWriter(Protocol):
+    def resolve(self, item_id: str) -> ParsedItem | None: ...
+
     def write_position(
-        self, collection_id: str, position_seconds: int, classification_id: str | None = None
+        self,
+        item: ParsedItem,
+        position_seconds: int,
+        *,
+        audio_index: int | None = None,
+        subtitle_index: int | None = None,
     ) -> WriteResult: ...
 
-    def mark_played(self, collection_id: str) -> WriteResult: ...
+    def mark_played(self, item: ParsedItem) -> WriteResult: ...
+
+    def list_skips(self, collection_id: str) -> list[dict]: ...
 
 
-def parse_item_id(item_id: str) -> tuple[str, str] | None:
-    """把 Emby 的 item id 拆成（collection_id, classification_id）。"""
+def parse_item_id(item_id: str) -> ParsedItem | None:
+    """只做格式识别；识别不了的交由 writer.resolve 用数据库兜底。"""
     if not isinstance(item_id, str):
         return None
-    match = _EMBY_ITEM.match(item_id)
-    if match is None:
-        return None
-    return match.group(1), match.group(2)
+    video = _VIDEO_ITEM.match(item_id)
+    if video is not None:
+        return ParsedItem(collection_id=video.group(2), classification_id=video.group(3), video_id=video.group(1))
+    collection = _COLLECTION_ITEM.match(item_id)
+    if collection is not None:
+        return ParsedItem(collection_id=collection.group(1), classification_id=collection.group(2))
+    return None
 
 
 def _checked(value: str) -> str:
@@ -51,14 +71,9 @@ def _checked(value: str) -> str:
 
 
 def _now_text() -> str:
-    """极影视的时间戳形如 2026-10-26 13:02:16.227973883+08:00。"""
     moment = datetime.now().astimezone()
     offset = moment.strftime("%z")
     return f"{moment:%Y-%m-%d %H:%M:%S.%f}{offset[:3]}:{offset[3:]}"
-
-
-def _valid_position(position_seconds: int) -> bool:
-    return isinstance(position_seconds, int) and position_seconds >= 0
 
 
 class LocalSqliteWriter:
@@ -68,58 +83,165 @@ class LocalSqliteWriter:
         self._db_path = db_path
         self._user = _checked(user_name)
 
-    def write_position(
-        self, collection_id: str, position_seconds: int, classification_id: str | None = None
-    ) -> WriteResult:
-        target = _checked(collection_id)
-        if not _valid_position(position_seconds):
-            return WriteResult(0, "invalid_position")
-        now = _now_text()
-        connection = sqlite3.connect(self._db_path, timeout=10)
+    def resolve(self, item_id: str) -> ParsedItem | None:
+        parsed = parse_item_id(item_id)
+        if parsed is not None:
+            return parsed
+        tokens = [token for token in re.split(r"[_\-]", item_id) if token and _ID_RE.match(token)]
+        connection = self._connect()
         try:
-            connection.execute("PRAGMA busy_timeout=5000")
+            for token in tokens:
+                row = connection.execute(
+                    "SELECT collection_id, video_id FROM zvideo_list WHERE user_name = ?"
+                    " AND (collection_id = ? OR video_id = ?) LIMIT 1",
+                    (self._user, token, token),
+                ).fetchone()
+                if row is None:
+                    continue
+                classification = connection.execute(
+                    "SELECT classification_id FROM zvideo_playlist WHERE user_name = ? AND collection_id = ? LIMIT 1",
+                    (self._user, row["collection_id"]),
+                ).fetchone()
+                if classification is None:
+                    continue
+                video_id = row["video_id"] if row["video_id"] == token else None
+                return ParsedItem(
+                    collection_id=row["collection_id"],
+                    classification_id=classification["classification_id"],
+                    video_id=video_id,
+                )
+        finally:
+            connection.close()
+        return None
+
+    def write_position(
+        self,
+        item: ParsedItem,
+        position_seconds: int,
+        *,
+        audio_index: int | None = None,
+        subtitle_index: int | None = None,
+    ) -> WriteResult:
+        if not isinstance(position_seconds, int) or position_seconds < 0:
+            return WriteResult(0, "invalid_position")
+        collection_id = _checked(item.collection_id)
+        now = _now_text()
+        connection = self._connect()
+        try:
             with connection:
+                meta = self._meta(connection, collection_id, item.video_id)
                 cursor = connection.execute(
-                    "UPDATE zvideo_playlist SET play_duration = ?, updated_at = ?"
+                    "UPDATE zvideo_playlist SET play_duration = ?, updated_at = ?,"
+                    " video_id = COALESCE(?, video_id), name = COALESCE(?, name),"
+                    " path = COALESCE(?, path), video_duration = COALESCE(?, video_duration),"
+                    " audio_index = COALESCE(?, audio_index), subtitle_index = COALESCE(?, subtitle_index)"
                     " WHERE user_name = ? AND collection_id = ?",
-                    (position_seconds, now, self._user, target),
+                    (
+                        position_seconds,
+                        now,
+                        meta[0],
+                        meta[1],
+                        meta[2],
+                        meta[3],
+                        audio_index,
+                        subtitle_index,
+                        self._user,
+                        collection_id,
+                    ),
                 )
                 if cursor.rowcount:
                     return WriteResult(cursor.rowcount)
-                if not classification_id:
+                if meta[0] is None:
                     return WriteResult(0, "not_in_playlist")
                 inserted = connection.execute(
-                    "INSERT INTO zvideo_playlist (user_name, classification_id, collection_id, video_id,"
-                    " name, path, play_duration, created_at, updated_at, video_duration)"
-                    " SELECT ?, ?, ?, video_id, name, path, ?, ?, ?, duration FROM zvideo_list"
-                    " WHERE user_name = ? AND collection_id = ? LIMIT 1",
-                    (self._user, _checked(classification_id), target, position_seconds, now, now, self._user, target),
+                    "INSERT INTO zvideo_playlist (user_name, classification_id, collection_id, video_id, name, path,"
+                    " play_duration, created_at, updated_at, video_duration, audio_index, subtitle_index)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self._user,
+                        _checked(item.classification_id),
+                        collection_id,
+                        meta[0],
+                        meta[1],
+                        meta[2],
+                        position_seconds,
+                        now,
+                        now,
+                        meta[3],
+                        audio_index,
+                        subtitle_index,
+                    ),
                 )
                 return WriteResult(inserted.rowcount, "" if inserted.rowcount else "not_in_library")
         finally:
             connection.close()
 
-    def mark_played(self, collection_id: str) -> WriteResult:
-        target = _checked(collection_id)
+    def mark_played(self, item: ParsedItem) -> WriteResult:
+        collection_id = _checked(item.collection_id)
         now = _now_text()
-        connection = sqlite3.connect(self._db_path, timeout=10)
+        connection = self._connect()
         try:
-            connection.execute("PRAGMA busy_timeout=5000")
             with connection:
-                cursor = connection.execute(
-                    "UPDATE zvideo_list SET state = ?, updated_at = ? WHERE user_name = ? AND collection_id = ?",
-                    (PLAYED_STATE, now, self._user, target),
-                )
+                if item.video_id:
+                    cursor = connection.execute(
+                        "UPDATE zvideo_list SET state = ?, updated_at = ?"
+                        " WHERE user_name = ? AND collection_id = ? AND video_id = ?",
+                        (PLAYED_STATE, now, self._user, collection_id, _checked(item.video_id)),
+                    )
+                else:
+                    cursor = connection.execute(
+                        "UPDATE zvideo_list SET state = ?, updated_at = ? WHERE user_name = ? AND collection_id = ?",
+                        (PLAYED_STATE, now, self._user, collection_id),
+                    )
                 connection.execute(
-                    "DELETE FROM zvideo_playlist WHERE user_name = ? AND collection_id = ?", (self._user, target)
+                    "DELETE FROM zvideo_playlist WHERE user_name = ? AND collection_id = ?",
+                    (self._user, collection_id),
                 )
                 return WriteResult(cursor.rowcount, "" if cursor.rowcount else "not_in_library")
         finally:
             connection.close()
 
+    def list_skips(self, collection_id: str) -> list[dict]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT start_time, end_time FROM zvideo_skip WHERE collection_id = ?", (collection_id,)
+            ).fetchall()
+            return [{"start": row["start_time"], "end": row["end_time"]} for row in rows]
+        except sqlite3.Error:
+            return []
+        finally:
+            connection.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._db_path, timeout=10)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
+        return connection
+
+    def _meta(
+        self, connection: sqlite3.Connection, collection_id: str, video_id: str | None
+    ) -> tuple[str | None, str | None, str | None, int | None]:
+        """取这一条（剧集是当前集）的 video_id/name/path/duration。"""
+        if video_id:
+            row = connection.execute(
+                "SELECT video_id, name, path, duration FROM zvideo_list"
+                " WHERE user_name = ? AND collection_id = ? AND video_id = ? LIMIT 1",
+                (self._user, collection_id, _checked(video_id)),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                "SELECT video_id, name, path, duration FROM zvideo_list"
+                " WHERE user_name = ? AND collection_id = ? LIMIT 1",
+                (self._user, collection_id),
+            ).fetchone()
+        if row is None:
+            return (None, None, None, None)
+        return (row["video_id"], row["name"], row["path"], row["duration"])
+
 
 class SshSqliteWriter:
-    """开发机用：SSH + sudo 在 NAS 上执行同样的语句。"""
+    """开发机调试用：SSH + sudo 远程执行。只支持两种标准 id，不做数据库兜底。"""
 
     def __init__(
         self,
@@ -137,53 +259,58 @@ class SshSqliteWriter:
         self._db_path = db_path
         self._user = _checked(user_name)
 
+    def resolve(self, item_id: str) -> ParsedItem | None:
+        return parse_item_id(item_id)
+
     def write_position(
-        self, collection_id: str, position_seconds: int, classification_id: str | None = None
+        self,
+        item: ParsedItem,
+        position_seconds: int,
+        *,
+        audio_index: int | None = None,
+        subtitle_index: int | None = None,
     ) -> WriteResult:
-        target = _checked(collection_id)
-        if not _valid_position(position_seconds):
+        if not isinstance(position_seconds, int) or position_seconds < 0:
             return WriteResult(0, "invalid_position")
         now = _now_text()
+        collection_id = _checked(item.collection_id)
+        video_clause = f"video_id='{_checked(item.video_id)}'" if item.video_id else "1=1"
         script = (
-            "PRAGMA busy_timeout=5000;"
-            "BEGIN IMMEDIATE;"
+            "PRAGMA busy_timeout=5000;BEGIN IMMEDIATE;"
             f"UPDATE zvideo_playlist SET play_duration={position_seconds}, updated_at='{now}'"
-            f" WHERE user_name='{self._user}' AND collection_id='{target}';"
+            f" WHERE user_name='{self._user}' AND collection_id='{collection_id}';"
             "SELECT 'upd', changes();"
+            "INSERT INTO zvideo_playlist (user_name, classification_id, collection_id, video_id, name, path,"
+            " play_duration, created_at, updated_at, video_duration)"
+            f" SELECT '{self._user}','{_checked(item.classification_id)}','{collection_id}', video_id, name, path,"
+            f" {position_seconds}, '{now}', '{now}', duration FROM zvideo_list"
+            f" WHERE user_name='{self._user}' AND collection_id='{collection_id}' AND {video_clause}"
+            f" AND NOT EXISTS (SELECT 1 FROM zvideo_playlist WHERE user_name='{self._user}'"
+            f" AND collection_id='{collection_id}') LIMIT 1;"
+            "SELECT 'ins', changes();COMMIT;"
         )
-        if classification_id:
-            script += (
-                "INSERT INTO zvideo_playlist (user_name, classification_id, collection_id, video_id, name, path,"
-                f" play_duration, created_at, updated_at, video_duration)"
-                f" SELECT '{self._user}', '{_checked(classification_id)}', '{target}', video_id, name, path,"
-                f" {position_seconds}, '{now}', '{now}', duration FROM zvideo_list"
-                f" WHERE user_name='{self._user}' AND collection_id='{target}'"
-                f" AND NOT EXISTS (SELECT 1 FROM zvideo_playlist WHERE user_name='{self._user}'"
-                f" AND collection_id='{target}') LIMIT 1;"
-                "SELECT 'ins', changes();"
-            )
-        script += "COMMIT;"
         counts = self._counts(script)
         changed = counts.get("upd", 0) + counts.get("ins", 0)
-        if changed:
-            return WriteResult(changed)
-        return WriteResult(0, "not_in_library")
+        return WriteResult(changed, "" if changed else "not_in_library")
 
-    def mark_played(self, collection_id: str) -> WriteResult:
-        target = _checked(collection_id)
+    def mark_played(self, item: ParsedItem) -> WriteResult:
         now = _now_text()
+        collection_id = _checked(item.collection_id)
+        scope = f" AND video_id='{_checked(item.video_id)}'" if item.video_id else ""
         script = (
-            "PRAGMA busy_timeout=5000;"
-            "BEGIN IMMEDIATE;"
+            "PRAGMA busy_timeout=5000;BEGIN IMMEDIATE;"
             f"UPDATE zvideo_list SET state={PLAYED_STATE}, updated_at='{now}'"
-            f" WHERE user_name='{self._user}' AND collection_id='{target}';"
+            f" WHERE user_name='{self._user}' AND collection_id='{collection_id}'{scope};"
             "SELECT 'mark', changes();"
-            f"DELETE FROM zvideo_playlist WHERE user_name='{self._user}' AND collection_id='{target}';"
+            f"DELETE FROM zvideo_playlist WHERE user_name='{self._user}' AND collection_id='{collection_id}';"
             "COMMIT;"
         )
         counts = self._counts(script)
         changed = counts.get("mark", 0)
         return WriteResult(changed, "" if changed else "not_in_library")
+
+    def list_skips(self, collection_id: str) -> list[dict]:
+        return []
 
     def _counts(self, script: str) -> dict[str, int]:
         output = self._run(script)
@@ -224,7 +351,7 @@ class SshSqliteWriter:
 
 def build_writer(mode: str, **kwargs: object) -> PlaylistWriter | None:
     if not kwargs.get("user_name"):
-        return None  # 没有用户标识就不写，避免写错人
+        return None
     if mode == "local":
         return LocalSqliteWriter(str(kwargs["db_path"]), str(kwargs["user_name"]))
     if mode == "ssh":

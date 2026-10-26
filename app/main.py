@@ -10,7 +10,9 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .proxy import UpstreamProxy
+from .runtime import RuntimeConfig
 from .store import ProgressStore
+from .web import AdminAuth, build_admin_router
 
 VERSION = "0.1.0"
 STARTED_AT = time.monotonic()
@@ -29,7 +31,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
     store = ProgressStore(settings.db_path)
-    proxy = UpstreamProxy(settings, store)
+    runtime = RuntimeConfig(store, settings)
+    proxy = UpstreamProxy(settings, store, runtime)
+    auth = AdminAuth(store, settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -41,6 +45,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.store = store
     app.state.proxy = proxy
+    app.state.runtime = runtime
+    app.include_router(build_admin_router(settings, store, runtime, proxy, auth, VERSION))
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -51,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "uptime_seconds": round(time.monotonic() - STARTED_AT, 1),
             "progress_records": store.count(),
             "native_mode": settings.native_mode,
+            "native_enabled": runtime.options.native_enabled,
         }
 
     @app.get("/debug/recent")

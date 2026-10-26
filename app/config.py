@@ -22,6 +22,9 @@ class Settings:
     native_db_path: str = "/zspace/zsrp/sqlite/zvideo/zvideo.db"
     native_user: str = ""
     native_min_interval: float = 10.0
+    sync_grace_seconds: float = 15.0
+    sync_stream_prefs: bool = True
+    admin_password: str = ""
     ssh_host: str = ""
     ssh_port: int = 22
     ssh_user: str = ""
@@ -59,6 +62,9 @@ class Settings:
             native_db_path=(source.get("NATIVE_DB_PATH") or "/zspace/zsrp/sqlite/zvideo/zvideo.db").strip(),
             native_user=(source.get("NATIVE_USER") or source.get("ZSPACE_USER") or "").strip(),
             native_min_interval=_float_value(source.get("NATIVE_MIN_INTERVAL"), 10.0, "NATIVE_MIN_INTERVAL"),
+            sync_grace_seconds=_float_value(source.get("SYNC_GRACE_SECONDS"), 15.0, "SYNC_GRACE_SECONDS"),
+            sync_stream_prefs=(source.get("SYNC_STREAM_PREFS") or "true").strip().lower() not in {"0", "false", "no"},
+            admin_password=source.get("ADMIN_PASSWORD") or "",
             ssh_host=ssh_host,
             ssh_port=_int_value(source.get("ZSPACE_SSH_PORT"), 22, "ZSPACE_SSH_PORT"),
             ssh_user=(source.get("ZSPACE_SSH_USER") or "").strip(),

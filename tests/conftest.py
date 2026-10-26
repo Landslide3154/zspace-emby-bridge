@@ -74,11 +74,13 @@ def build_upstream() -> tuple[FastAPI, dict]:
     @app.get("/emby/Users/u1/Items/i1")
     async def emby_item() -> Response:
         seen["calls"].append({"path": "/emby/Users/u1/Items/i1"})
+        # 上游默认「没有记录」，本地进度才应该被顶上；
+        # 需要上游有记录时用 i2（带 LastPlayedDate）
         return JSONResponse(
             {
                 "Id": "i1",
                 "RunTimeTicks": 60000000000,
-                "UserData": {"PlaybackPositionTicks": 500000000, "Played": bool(seen.get("played"))},
+                "UserData": {"PlaybackPositionTicks": 0, "Played": bool(seen.get("played"))},
             }
         )
 
@@ -100,7 +102,7 @@ def build_upstream() -> tuple[FastAPI, dict]:
     async def resume_list() -> Response:
         return JSONResponse(
             {
-                "Items": [{"Id": "i1", "RunTimeTicks": 60000000000, "UserData": {"PlaybackPositionTicks": 500000000}}],
+                "Items": [{"Id": "i1", "RunTimeTicks": 60000000000, "UserData": {"PlaybackPositionTicks": 0}}],
                 "TotalRecordCount": 1,
             }
         )
