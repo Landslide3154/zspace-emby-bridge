@@ -1,7 +1,7 @@
 [project]
 name = "zspace-emby-bridge"
-version = "0.1.0"
-description = "极影视进度桥：把 Hills 的播放进度写进极影视"
+version = "0.2.0"
+description = "极影视进度桥：把 Hills 的播放进度写进极影视，并补齐合集封面"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
