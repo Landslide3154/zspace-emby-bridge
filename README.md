@@ -49,23 +49,47 @@ Hills ──▶ 本代理 :8022 ──▶ 极影视 Emby :8021   读接口 / 图
 极空间上用 Docker 界面建的项目，目录一般是
 `/tmp/zfsv3/nvme12/<账号>/data/docker/<项目名>/`（和 jackett、komga 同级）。
 
-> **极空间的图形界面会拦挂载路径**：它对 volume 做自定义校验，`/zspace/...` 这类系统分区会被拒，报
+> **极空间图形界面会拦挂载路径**：它对 service 里的 `host:container` 挂载做自定义校验，`/zspace/...` 这类系统分区会被拒，报
 > `custom validation failed: invalid volume path: /zspace/zsrp/sqlite/zvideo`。
-> 这不是 compose 配置错，命令行完全不拦（同样配置 `docker compose config` 通过）。
-> 用 SSH 部署即可绕过，放在用户可写又不会被清掉的目录：
+> 这不是 compose 写错——同样配置命令行 `docker compose config` 能通过，纯 GUI 校验。
 >
-> ```bash
-> mkdir -p /home/zspace-emby-bridge && cd /home/zspace-emby-bridge
-> # 把 docker-compose.yml 与 .env 放进这个目录
-> sudo docker compose up -d
+> **仍然用图形界面管理、又必须挂到 `/zspace` 的写法：命名卷 + bind 驱动**。界面看到的是卷名，实际挂载落在 `/zspace`：
+>
+> ```yaml
+> services:
+>   bridge:
+>     # ……其余同上……
+>     volumes:
+>       - ./config:/data
+>       - zvideo-db:/zvideo          # 不写 host 路径，写卷名
+>
+> volumes:
+>   zvideo-db:
+>     driver: local
+>     driver_opts:
+>       type: none
+>       o: bind
+>       device: /zspace/zsrp/sqlite/zvideo
 > ```
 >
-> 或者：在它允许的路径下建一个软链，再挂软链（Docker 挂载时会解析到真实目录）：
+> 如果界面连 `device:` 里的路径也校验，就退成「外部卷」——路径只在一次性创建时出现，之后 compose 里只有卷名：
 >
 > ```bash
-> sudo ln -s /zspace/zsrp/sqlite/zvideo /tmp/zfsv3/nvme12/<账号>/data/docker/zvideo
-> # compose 里改成： - /tmp/zfsv3/nvme12/<账号>/data/docker/zvideo:/zvideo
+> sudo docker volume create zvideo-db --driver local \
+>   --opt type=none --opt o=bind --opt device=/zspace/zsrp/sqlite/zvideo
 > ```
+>
+> ```yaml
+>     volumes:
+>       - ./config:/data
+>       - zvideo-db:/zvideo
+>
+> volumes:
+>   zvideo-db:
+>     external: true
+> ```
+>
+> 两种写法我都在极空间上实测过：容器里 `ls /zvideo` 能看到 `zvideo.db`（206 MB）与 `zvideo.db-wal`，`/healthz` 返回 200。
 
 ### 1. `docker-compose.yml`（注释版，复制即用）
 
@@ -253,7 +277,7 @@ docker build --build-arg BASE=docker.1ms.run/library/python:3.12-slim \
 
 | 现象 | 先看哪里 |
 | --- | --- |
-| `custom validation failed: invalid volume path` | 极空间图形界面只在白名单路径下允许挂载；改用 SSH `sudo docker compose up -d`，或把库目录软链到它允许的路径 |
+| `custom validation failed: invalid volume path` | 极空间图形界面只放行它白名单内的 host 挂载路径；改用「命名卷 + bind 驱动」写法（见「目录结构」下方的说明），或退成外部卷 |
 | Hills 连不上 | `/healthz`、端口 8022 是否映射、防火墙 |
 | 进度不同步到极影视 | 日志有没有 `原生进度已写`；面板里「原生进度写入」是否开着 |
 | 日志 `原生进度未写 … reason=unresolved_id` | 该条目的 id 形态没认出来，把日志里的 item 发到 issues |
