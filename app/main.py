@@ -14,7 +14,18 @@ from .runtime import RuntimeConfig
 from .store import ProgressStore
 from .web import AdminAuth, build_admin_router
 
-VERSION = "0.1.0"
+
+def _package_version() -> str:
+    """版本号唯一来源是 pyproject.toml：装进镜像后从包元数据读。"""
+    try:
+        from importlib.metadata import version
+
+        return version("zspace-emby-bridge")
+    except Exception:  # 源码直跑（没 pip install）时退回开发标记
+        return "dev"
+
+
+VERSION = _package_version()
 STARTED_AT = time.monotonic()
 
 
