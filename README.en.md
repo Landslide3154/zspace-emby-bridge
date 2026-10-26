@@ -47,6 +47,26 @@ Requires `/zspace/zsrp/sqlite/zvideo/zvideo.db` on the host (created by 极影�
 On ZSpace, Docker-created projects live under
 `/tmp/zfsv3/nvme12/<account>/data/docker/<project>/` (same place as jackett and komga).
 
+> **The ZSpace Docker GUI rejects some bind mounts**: it runs its own validation, so system partitions
+> like `/zspace/...` are refused with
+> `custom validation failed: invalid volume path: /zspace/zsrp/sqlite/zvideo`.
+> The compose file is not wrong — the CLI does not validate this (the same config passes `docker compose config`).
+> Deploy over SSH instead, from a directory that is writable and survives reboots:
+>
+> ```bash
+> mkdir -p /home/zspace-emby-bridge && cd /home/zspace-emby-bridge
+> # put docker-compose.yml and .env here
+> sudo docker compose up -d
+> ```
+>
+> Alternatively, symlink the DB directory into a path the GUI accepts and mount the symlink
+> (Docker resolves it on the host):
+>
+> ```bash
+> sudo ln -s /zspace/zsrp/sqlite/zvideo /tmp/zfsv3/nvme12/<account>/data/docker/zvideo
+> # then in compose: - /tmp/zfsv3/nvme12/<account>/data/docker/zvideo:/zvideo
+> ```
+
 ### 1. `docker-compose.yml` (annotated, copy as-is)
 
 ```yaml
@@ -232,6 +252,7 @@ Open `http://<NAS>:8022/admin`:
 
 | Symptom | Where to look |
 | --- | --- |
+| `custom validation failed: invalid volume path` | the ZSpace GUI only allows whitelisted mount paths; deploy over SSH with `sudo docker compose up -d`, or symlink the DB directory into an allowed path |
 | Hills cannot connect | `/healthz`, port mapping, firewall |
 | Progress not written | log line `原生进度已写`, console toggle for native writes |
 | `reason=unresolved_id` | unknown item id shape — open an issue with the id from the log |

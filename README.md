@@ -49,6 +49,24 @@ Hills ──▶ 本代理 :8022 ──▶ 极影视 Emby :8021   读接口 / 图
 极空间上用 Docker 界面建的项目，目录一般是
 `/tmp/zfsv3/nvme12/<账号>/data/docker/<项目名>/`（和 jackett、komga 同级）。
 
+> **极空间的图形界面会拦挂载路径**：它对 volume 做自定义校验，`/zspace/...` 这类系统分区会被拒，报
+> `custom validation failed: invalid volume path: /zspace/zsrp/sqlite/zvideo`。
+> 这不是 compose 配置错，命令行完全不拦（同样配置 `docker compose config` 通过）。
+> 用 SSH 部署即可绕过，放在用户可写又不会被清掉的目录：
+>
+> ```bash
+> mkdir -p /home/zspace-emby-bridge && cd /home/zspace-emby-bridge
+> # 把 docker-compose.yml 与 .env 放进这个目录
+> sudo docker compose up -d
+> ```
+>
+> 或者：在它允许的路径下建一个软链，再挂软链（Docker 挂载时会解析到真实目录）：
+>
+> ```bash
+> sudo ln -s /zspace/zsrp/sqlite/zvideo /tmp/zfsv3/nvme12/<账号>/data/docker/zvideo
+> # compose 里改成： - /tmp/zfsv3/nvme12/<账号>/data/docker/zvideo:/zvideo
+> ```
+
 ### 1. `docker-compose.yml`（注释版，复制即用）
 
 ```yaml
@@ -235,6 +253,7 @@ docker build --build-arg BASE=docker.1ms.run/library/python:3.12-slim \
 
 | 现象 | 先看哪里 |
 | --- | --- |
+| `custom validation failed: invalid volume path` | 极空间图形界面只在白名单路径下允许挂载；改用 SSH `sudo docker compose up -d`，或把库目录软链到它允许的路径 |
 | Hills 连不上 | `/healthz`、端口 8022 是否映射、防火墙 |
 | 进度不同步到极影视 | 日志有没有 `原生进度已写`；面板里「原生进度写入」是否开着 |
 | 日志 `原生进度未写 … reason=unresolved_id` | 该条目的 id 形态没认出来，把日志里的 item 发到 issues |
