@@ -24,6 +24,7 @@ class Settings:
     native_min_interval: float = 10.0
     sync_grace_seconds: float = 15.0
     sync_stream_prefs: bool = True
+    collection_cover: bool = True
     admin_password: str = ""
     allowed_ips: str = ""
     ssh_host: str = ""
@@ -65,6 +66,7 @@ class Settings:
             native_min_interval=_float_value(source.get("NATIVE_MIN_INTERVAL"), 10.0, "NATIVE_MIN_INTERVAL"),
             sync_grace_seconds=_float_value(source.get("SYNC_GRACE_SECONDS"), 15.0, "SYNC_GRACE_SECONDS"),
             sync_stream_prefs=(source.get("SYNC_STREAM_PREFS") or "true").strip().lower() not in {"0", "false", "no"},
+            collection_cover=(source.get("COLLECTION_COVER") or "true").strip().lower() not in {"0", "false", "no"},
             admin_password=source.get("ADMIN_PASSWORD") or "",
             allowed_ips=(source.get("ALLOWED_IPS") or "").strip(),
             ssh_host=ssh_host,

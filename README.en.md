@@ -14,6 +14,7 @@
 - **极影视 is authoritative**: its record wins; if it is cleared, the local copy is cleared too
 - **Played sync**: marks watched past a threshold; per-episode for series, never whole-season by accident
 - **Audio / subtitle preference**: writes the client's selection back to 极影视
+- **Collection covers**: manual collections without a cover fall back to their first item's cover — no per-collection upload needed
 - **Web console**: first visit asks for a password; change upstream URL, threshold, intervals, switches, log level and IP allowlist on the fly
 - **Readable**: sync rows show title and file name; search by title, file name or collection_id
 - **Diagnosable**: one-click upstream test, override/cleared events, currently playing items
@@ -217,6 +218,7 @@ docker build --build-arg BASE=docker.1ms.run/library/python:3.12-slim \
 | `NATIVE_MIN_INTERVAL` | `10` | min seconds between DB writes |
 | `SYNC_GRACE_SECONDS` | `15` | grace window for local records |
 | `SYNC_STREAM_PREFS` | `true` | sync audio/subtitle selection |
+| `COLLECTION_COVER` | `true` | fall back to the first item's cover for coverless collections |
 | `ADMIN_PASSWORD` | – | preset console password; empty means set it on first visit |
 | `ZSPACE_SSH_HOST` / `_PORT` / `_USER` / `ZSPACE_PASS` | – | only for `NATIVE_MODE=ssh` (dev debugging) |
 

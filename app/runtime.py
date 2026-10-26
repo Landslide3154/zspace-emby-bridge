@@ -18,6 +18,7 @@ class Options:
     native_min_interval: float = 10.0
     sync_grace_seconds: float = 15.0
     sync_stream_prefs: bool = True
+    collection_cover: bool = True
     log_level: str = "INFO"
     upstream_url: str = ""
     allowed_ips: str = ""
@@ -34,6 +35,7 @@ class RuntimeConfig:
             native_min_interval=settings.native_min_interval,
             sync_grace_seconds=settings.sync_grace_seconds,
             sync_stream_prefs=settings.sync_stream_prefs,
+            collection_cover=settings.collection_cover,
             log_level=settings.log_level,
             upstream_url=settings.upstream_url,
             allowed_ips=settings.allowed_ips,
@@ -64,6 +66,10 @@ class RuntimeConfig:
             options = replace(
                 options, sync_stream_prefs=_as_bool(stored["sync_stream_prefs"], options.sync_stream_prefs)
             )
+        if "collection_cover" in stored:
+            options = replace(
+                options, collection_cover=_as_bool(stored["collection_cover"], options.collection_cover)
+            )
         if "log_level" in stored and stored["log_level"].upper() in LOG_LEVELS:
             options = replace(options, log_level=stored["log_level"].upper())
         if "upstream_url" in stored:
@@ -78,7 +84,7 @@ class RuntimeConfig:
     def reset(self) -> Options:
         """清掉面板里的覆盖值，回到环境变量默认。"""
         keys = ["native_enabled", "played_threshold", "native_min_interval",
-                "sync_grace_seconds", "sync_stream_prefs", "log_level",
+                "sync_grace_seconds", "sync_stream_prefs", "collection_cover", "log_level",
                 "upstream_url", "allowed_ips"]
         self._store.delete_settings(keys)
         self._options = self._defaults
@@ -106,6 +112,8 @@ class RuntimeConfig:
             options = replace(options, sync_grace_seconds=grace)
         if "sync_stream_prefs" in changes:
             options = replace(options, sync_stream_prefs=bool(changes["sync_stream_prefs"]))
+        if "collection_cover" in changes:
+            options = replace(options, collection_cover=bool(changes["collection_cover"]))
         if "log_level" in changes:
             level = str(changes["log_level"]).upper()
             if level not in LOG_LEVELS:
@@ -132,6 +140,7 @@ def _as_dict(options: Options) -> dict[str, object]:
         "native_min_interval": options.native_min_interval,
         "sync_grace_seconds": options.sync_grace_seconds,
         "sync_stream_prefs": options.sync_stream_prefs,
+        "collection_cover": options.collection_cover,
         "log_level": options.log_level,
         "upstream_url": options.upstream_url,
         "allowed_ips": options.allowed_ips,

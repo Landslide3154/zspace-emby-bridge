@@ -13,6 +13,10 @@ _ITEM_PATH = re.compile(r"^/(?:emby/)?users/[^/]+/items/(?P<item>[^/?]+)/?$", re
 _LIST_PATH = re.compile(r"^/(?:emby/)?(?:users/[^/]+/)?items(?:/(?:resume|latest))?/?$", re.IGNORECASE)
 _RESERVED_ITEMS = frozenset({"resume", "latest", "count"})
 
+# 手动合集在极影视里没有封面时，Emby 层不给 ImageTags，客户端就不会去取图。
+# 这里统一打一个假 tag，配合代理的「用合集第一条的封面兜底」。
+COLLECTION_COVER_TAG = "bridge-fallback"
+
 _ISO8601 = re.compile(
     r"^(?P<y>\d{4})-(?P<mo>\d{2})-(?P<d>\d{2})[T ](?P<h>\d{2}):(?P<mi>\d{2}):(?P<s>\d{2})"
     r"(?:\.(?P<frac>\d+))?(?P<tz>Z|[+-]\d{2}:?\d{2})?$"
@@ -124,9 +128,10 @@ def rewrite_payload(
     grace: float = 15.0,
     on_clear: Callable[[str], None] | None = None,
     on_override: Callable[[str], None] | None = None,
+    cover_tag: str | None = None,
 ) -> Any:
     """递归重写所有带 Id + UserData 的条目；其余字段原样保留。"""
-    return _walk(payload, resolver, time.time() if now is None else now, grace, on_clear, on_override)
+    return _walk(payload, resolver, time.time() if now is None else now, grace, on_clear, on_override, cover_tag)
 
 
 def collect_runtimes(payload: Any) -> dict[str, int]:
@@ -156,6 +161,7 @@ def _walk(
     grace: float,
     on_clear: Callable[[str], None] | None,
     on_override: Callable[[str], None] | None = None,
+    cover_tag: str | None = None,
 ) -> Any:
     if isinstance(node, dict):
         item_id = node.get("Id")
@@ -166,10 +172,30 @@ def _walk(
             if overridden and on_override is not None:
                 on_override(item_id)
             node = merged
-        return {key: _walk(value, resolver, now, grace, on_clear, on_override) for key, value in node.items()}
+        if cover_tag is not None:
+            node = _ensure_collection_cover(node, cover_tag)
+        return {
+            key: _walk(value, resolver, now, grace, on_clear, on_override, cover_tag)
+            for key, value in node.items()
+        }
     if isinstance(node, list):
-        return [_walk(entry, resolver, now, grace, on_clear, on_override) for entry in node]
+        return [_walk(entry, resolver, now, grace, on_clear, on_override, cover_tag) for entry in node]
     return node
+
+
+def _ensure_collection_cover(node: dict[str, Any], tag: str) -> dict[str, Any]:
+    """合集没有封面时补一个 ImageTags.Primary，客户端才会去请求封面。"""
+    item_id = node.get("Id")
+    if not isinstance(item_id, str) or not item_id.startswith("collection_"):
+        return node
+    tags = node.get("ImageTags")
+    if isinstance(tags, dict) and tags.get("Primary"):
+        return node
+    merged = dict(node)
+    merged["ImageTags"] = {**(tags if isinstance(tags, dict) else {}), "Primary": tag}
+    if not merged.get("PrimaryImageAspectRatio"):
+        merged["PrimaryImageAspectRatio"] = 0.6666666666666666
+    return merged
 
 
 def _played_percentage(position_ticks: int, runtime_ticks: Any) -> float | None:

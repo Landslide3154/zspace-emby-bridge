@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 import httpx
 from fastapi import Request
@@ -19,7 +19,7 @@ from starlette.background import BackgroundTask
 from .config import Settings
 from .native import build_writer, parse_item_id
 from .redact import redact_json, redact_url
-from .rewrite import LocalProgress, collect_runtimes, is_rewritable_path, rewrite_payload
+from .rewrite import COLLECTION_COVER_TAG, LocalProgress, collect_runtimes, is_rewritable_path, rewrite_payload
 from .store import ProgressStore, token_hash
 
 logger = logging.getLogger("bridge.proxy")
@@ -29,6 +29,11 @@ CONTROL_PREFIX = "/sessions/playing"
 
 _TOKEN_IN_AUTH = re.compile(r'Token="?([^",]+)"?', re.IGNORECASE)
 _USER_IN_PATH = re.compile(r"^/(?:emby/)?users/([^/]+)/", re.IGNORECASE)
+# 合集的封面请求：/Items/collection_<cid>_<classid>/Images/Primary
+_COLLECTION_IMAGE = re.compile(
+    r"^/(?:emby/)?Items/(?P<item>collection_[^/]+)/Images/(?P<kind>[^/?#]+)", re.IGNORECASE
+)
+COVER_CACHE_SECONDS = 300.0
 
 
 def extract_token(request: Request) -> str | None:
@@ -203,6 +208,7 @@ class UpstreamProxy:
             password=settings.ssh_password,
         )
         self._last_native: dict[str, float] = {}
+        self._cover_first: dict[str, tuple[float, str | None]] = {}
         self._sessions: dict[str, dict] = {}
         upstream = runtime.options.upstream_url if runtime is not None else settings.upstream_url
         self._client = self._build_client(upstream)
@@ -310,6 +316,9 @@ class UpstreamProxy:
             upstream.status_code,
             (time.perf_counter() - started) * 1000,
         )
+        cover = await self._collection_cover(request, upstream)
+        if cover is not None:
+            return cover
         if self._should_rewrite(request, upstream, token_id):
             return await self._rewritten(upstream, token_id)
 
@@ -320,6 +329,67 @@ class UpstreamProxy:
             headers=response_headers,
             background=BackgroundTask(upstream.aclose),
         )
+
+    async def _collection_cover(self, request: Request, upstream: httpx.Response) -> Response | None:
+        """合集没有封面时，用合集里第一条的封面兜底。
+
+        极影视的 Emby 层对手动合集（没设封面）返回 404，客户端只显示空白；
+        这里把请求换成第一条的 `video_<vid>_<cid>_<classid>` 封面，字节原样返回。
+        """
+        if upstream.status_code != 404 or request.method.upper() != "GET":
+            return None
+        if not self._option("collection_cover", True) or self._writer is None:
+            return None
+        match = _COLLECTION_IMAGE.match(request.url.path)
+        if match is None:
+            return None
+        parsed = parse_item_id(match.group("item"))
+        if parsed is None:
+            return None
+        video_id = self._first_video(parsed.collection_id)
+        if not video_id:
+            return None
+        child = f"video_{video_id}_{parsed.collection_id}_{parsed.classification_id}"
+        path = request.url.path[: match.start("item")] + child + request.url.path[match.end("item") :]
+        query = [(key, value) for key, value in request.query_params.multi_items() if key.lower() != "tag"]
+        target = path + (f"?{urlencode(query)}" if query else "")
+        await upstream.aclose()
+        headers = {key: value for key, value in request.headers.items() if key.lower() not in HOP_BY_HOP}
+        try:
+            fallback = await self._client.send(
+                self._client.build_request("GET", target, headers=headers), stream=True
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("合集封面兜底失败 item=%s: %s", match.group("item"), type(exc).__name__)
+            return None
+        if fallback.status_code != 200:
+            await fallback.aclose()
+            return None
+        logger.info("合集封面兜底 %s -> %s", match.group("item"), child)
+        response_headers = {
+            key: value for key, value in fallback.headers.items() if key.lower() not in RESPONSE_DROP
+        }
+        return StreamingResponse(
+            fallback.aiter_raw(),
+            status_code=200,
+            headers=response_headers,
+            background=BackgroundTask(fallback.aclose),
+        )
+
+    def _first_video(self, collection_id: str) -> str | None:
+        """合集里第一条的 video_id；缓存 5 分钟。"""
+        now = time.time()
+        cached = self._cover_first.get(collection_id)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        lookup = getattr(self._writer, "first_video_id", None)
+        video_id: str | None = None
+        if lookup is not None:
+            video_id = lookup(collection_id) or None
+        if len(self._cover_first) > 512:
+            self._cover_first.clear()
+        self._cover_first[collection_id] = (now + COVER_CACHE_SECONDS, video_id)
+        return video_id
 
     def _should_rewrite(self, request: Request, upstream: httpx.Response, token_id: str) -> bool:
         """只改写 JSON 控制面响应；视频流永远走流式透传。"""
@@ -350,6 +420,7 @@ class UpstreamProxy:
             grace=self._option('sync_grace_seconds', 15.0),
             on_clear=lambda item_id: self._clear_local(token_id, item_id),
             on_override=lambda item_id: self._record_override(token_id, item_id),
+            cover_tag=COLLECTION_COVER_TAG if self._option("collection_cover", True) else None,
         )
         runtimes = collect_runtimes(rewritten)
         if runtimes:

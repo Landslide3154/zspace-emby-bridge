@@ -86,6 +86,15 @@ def test_parse_item_id_forms() -> None:
     assert parse_item_id("") is None
 
 
+def test_first_video_id(tmp_path: Path) -> None:
+    db = make_db(tmp_path / "zvideo.db")
+    writer = LocalSqliteWriter(str(db), USER)
+    # 合集里「第一个添加」的那条（id 最小的）
+    assert writer.first_video_id(SERIES) == VIDEO
+    assert writer.first_video_id(COLLECTION) == "7d2002151cff985"
+    assert writer.first_video_id("000000000000000") is None
+
+
 def test_resolve_falls_back_to_database(tmp_path: Path) -> None:
     db = make_db(tmp_path / "zvideo.db")
     writer = LocalSqliteWriter(str(db), USER)

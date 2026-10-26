@@ -174,6 +174,14 @@ def build_upstream() -> tuple[FastAPI, dict]:
         seen["calls"].append({"path": "/emby/Sessions/Playing/Progress", "body": await request.json()})
         return Response(status_code=400)
 
+    @app.get("/emby/Items/{item_id}/Images/{kind}")
+    async def item_image(item_id: str, kind: str) -> Response:
+        seen["calls"].append({"path": f"/emby/Items/{item_id}/Images/{kind}"})
+        # 合集没封面：404；条目有封面：返回图片字节
+        if item_id.startswith("collection_"):
+            return Response(status_code=404)
+        return Response(b"IMAGE-BYTES", media_type="image/jpeg")
+
     @app.get("/{path:path}")
     async def unknown(path: str) -> Response:
         seen["calls"].append({"path": f"/{path}"})

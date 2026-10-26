@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from app.rewrite import (
+    COLLECTION_COVER_TAG,
     LocalProgress,
     collect_runtimes,
     is_rewritable_path,
@@ -131,3 +132,30 @@ def test_path_gate() -> None:
     assert is_rewritable_path("/Videos/v1/stream.mkv") is False
     assert is_rewritable_path("/emby/Items/i1/PlaybackInfo") is False
     assert is_rewritable_path("/emby/Items/i1/Images/Primary") is False
+
+
+def test_collection_without_cover_gets_a_tag() -> None:
+    """手动合集没有封面时补 ImageTags.Primary，客户端才会来取图。"""
+    payload = {
+        "Items": [
+            {"Id": "collection_c1_x", "Name": "手动合集", "ImageTags": {}},
+            {"Id": "video_v1_c1_x", "Name": "第一集", "ImageTags": {"Primary": "real"}},
+            {"Id": "collection_c2_x", "Name": "有封面", "ImageTags": {"Primary": "abc"}},
+            {"Id": "episode_1_c1", "Name": "别的形态"},
+        ]
+    }
+    rewritten = rewrite_payload(payload, lambda item_id: None, cover_tag=COLLECTION_COVER_TAG)
+    items = {entry["Id"]: entry for entry in rewritten["Items"]}
+    assert items["collection_c1_x"]["ImageTags"] == {"Primary": COLLECTION_COVER_TAG}
+    assert items["collection_c1_x"]["PrimaryImageAspectRatio"] == pytest.approx(0.6667, abs=1e-3)
+    # 已经有的封面不动
+    assert items["collection_c2_x"]["ImageTags"] == {"Primary": "abc"}
+    # 非合集条目不动
+    assert items["video_v1_c1_x"]["ImageTags"] == {"Primary": "real"}
+    assert "ImageTags" not in items["episode_1_c1"]
+
+
+def test_collection_cover_tag_disabled() -> None:
+    payload = {"Items": [{"Id": "collection_c1_x", "ImageTags": {}}]}
+    rewritten = rewrite_payload(payload, lambda item_id: None)
+    assert rewritten["Items"][0]["ImageTags"] == {}

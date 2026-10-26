@@ -7,6 +7,8 @@ import time
 import httpx
 import pytest
 
+CLASSIFICATION = "484e30ab-18be-4c7a-a6dd-e7105cad7e48"
+
 
 def test_healthz(client: httpx.Client) -> None:
     r = client.get("/healthz")
@@ -107,6 +109,65 @@ def test_dead_upstream_returns_502(upstream: object, monkeypatch: pytest.MonkeyP
         r = httpx.get(f"{server.url}/System/Info/Public", timeout=10, trust_env=False)
     assert r.status_code == 502
     assert "upstream" in r.json()["error"].lower()
+
+
+def _list_db(tmp_path) -> object:
+    """只有 zvideo_list 的最小库：合集 cov1 里第一条是 vid1。"""
+    import sqlite3
+
+    db = tmp_path / "zvideo.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE zvideo_list (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name varchar,"
+        " video_id varchar, collection_id varchar, episode smallint, name varchar, path varchar,"
+        " duration integer, state tinyint default 1, updated_at datetime);"
+        "CREATE TABLE zvideo_playlist (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name varchar,"
+        " classification_id varchar, collection_id varchar, video_id varchar, name varchar,"
+        " path varchar, play_duration integer, created_at datetime, updated_at datetime,"
+        " video_duration integer, audio_index text, subtitle_index text);"
+    )
+    conn.execute(
+        "INSERT INTO zvideo_list (user_name, video_id, collection_id, name) VALUES (?,?,?,?)",
+        ("u1", "vid1", "cov1", "第一条.mkv"),
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _cover_request(upstream: object, db_path: object, *, enabled: bool = True) -> httpx.Response:
+    from app.config import Settings
+    from app.main import create_app
+    from tests.conftest import LiveServer, free_port
+
+    settings = Settings(
+        upstream_url=upstream.url,
+        listen_port=8022,
+        db_path=":memory:",
+        log_level="INFO",
+        tz="Asia/Shanghai",
+        played_threshold=0.9,
+        native_mode="local",
+        native_db_path=str(db_path),
+        native_user="u1",
+        collection_cover=enabled,
+    )
+    url = f"/emby/Items/collection_cov1_{CLASSIFICATION}/Images/Primary"
+    with LiveServer(create_app(settings), free_port()) as server:
+        return httpx.get(f"{server.url}{url}", timeout=10, trust_env=False)
+
+
+def test_collection_cover_falls_back_to_first_item(upstream: object, tmp_path) -> None:
+    """手动合集没封面：上游 404，代理用合集第一条的封面顶上去。"""
+    r = _cover_request(upstream, _list_db(tmp_path))
+    assert r.status_code == 200
+    assert r.content == b"IMAGE-BYTES"
+    assert r.headers["content-type"] == "image/jpeg"
+
+
+def test_collection_cover_fallback_can_be_disabled(upstream: object, tmp_path) -> None:
+    r = _cover_request(upstream, _list_db(tmp_path), enabled=False)
+    assert r.status_code == 404
 
 
 def test_response_carries_single_date_header(client: httpx.Client) -> None:

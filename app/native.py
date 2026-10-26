@@ -279,6 +279,22 @@ class LocalSqliteWriter:
         finally:
             connection.close()
 
+    def first_video_id(self, collection_id: str) -> str | None:
+        """合集里「第一个添加」的条目（按自增 id 升序），用作兜底封面来源。"""
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT video_id FROM zvideo_list"
+                " WHERE user_name = ? AND collection_id = ?"
+                " ORDER BY id LIMIT 1",
+                (self._user, _checked(collection_id)),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        finally:
+            connection.close()
+        return row["video_id"] if row is not None else None
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._db_path, timeout=10)
         connection.row_factory = sqlite3.Row
@@ -383,6 +399,18 @@ class SshSqliteWriter:
 
     def list_skips(self, collection_id: str) -> list[dict]:
         return []
+
+    def first_video_id(self, collection_id: str) -> str | None:
+        try:
+            output = self._run(
+                "SELECT video_id FROM zvideo_list"
+                f" WHERE user_name = '{_checked(self._user)}'"
+                f" AND collection_id = '{_checked(collection_id)}'"
+                " ORDER BY id LIMIT 1;"
+            )
+        except RuntimeError:
+            return None
+        return output.strip() or None
 
     def _counts(self, script: str) -> dict[str, int]:
         output = self._run(script)
